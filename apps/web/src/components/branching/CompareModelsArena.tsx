@@ -44,6 +44,7 @@ interface MediaCompareResult {
 interface JudgeVerdict {
   winnerIndex: number;
   summary: string;
+  differences?: string[];
   scores: Array<{ index: number; score: number; rationale: string }>;
 }
 
@@ -320,16 +321,25 @@ export function CompareModelsArena({
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
         </div>
 
-        {/* Judge Banner (Text Mode) */}
+        {/* Judge & Comparative Difference Analysis Banner (Text Mode) */}
         {verdict ? (
-          <div className="flex shrink-0 items-center gap-2.5 border-b border-amber-500/30 bg-amber-500/10 px-5 py-2 text-xs">
-            <Trophy className="size-4 shrink-0 text-amber-400" />
-            <div className="min-w-0 flex-1">
-              <strong className="text-amber-300">
-                AI Judge Pick: {textResults[verdict.winnerIndex]?.displayName}
-              </strong>
-              <span className="ml-2 text-foreground/90">{verdict.summary}</span>
+          <div className="shrink-0 space-y-1.5 border-b border-amber-500/30 bg-amber-500/10 px-5 py-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              <Trophy className="size-4 shrink-0 text-amber-400" />
+              <div className="min-w-0 flex-1">
+                <strong className="text-amber-300">
+                  AI Analysis Winner: {textResults[verdict.winnerIndex]?.displayName}
+                </strong>
+                <span className="ml-2 text-foreground/90">{verdict.summary}</span>
+              </div>
             </div>
+            {verdict.differences && verdict.differences.length > 0 ? (
+              <ul className="list-disc space-y-0.5 pl-6 text-[11px] text-amber-100/90">
+                {verdict.differences.map((diff, idx) => (
+                  <li key={idx}>{diff}</li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         ) : null}
 
@@ -358,7 +368,7 @@ export function CompareModelsArena({
                     ) : (
                       <Award className="size-3.5 text-amber-400" />
                     )}
-                    <span>Run AI Judge</span>
+                    <span>AI Analysis & Differences</span>
                   </Button>
                   <Button
                     type="button"

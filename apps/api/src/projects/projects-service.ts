@@ -685,7 +685,6 @@ export function createProjectsService(prisma: PrismaClient) {
           where: {
             id: message.id,
             activeRevisionId: message.activeRevisionId,
-            blocks: { equals: blocks as object },
           },
           data: { blocks: nextBlocks as object },
         });
@@ -2059,7 +2058,7 @@ export function createProjectsService(prisma: PrismaClient) {
           {
             role: "system",
             content:
-              'You are an impartial AI Judge comparing model responses. Respond with STRICT valid JSON only: {"winnerIndex":0,"summary":"1-2 sentence verdict","scores":[{"index":0,"score":8.5,"rationale":"concise reason"}]}',
+              'You are an impartial AI Judge comparing model responses. Respond with STRICT valid JSON only: {"winnerIndex":0,"summary":"1-2 sentence verdict","differences":["Bullet 1 explaining how Model A differs from Model B","Bullet 2 on depth/tone/accuracy trade-offs","Bullet 3 on best use case for each"],"scores":[{"index":0,"score":8.5,"rationale":"concise reason"}]}',
           },
           {
             role: "user",
@@ -2073,12 +2072,14 @@ export function createProjectsService(prisma: PrismaClient) {
         const parsed = JSON.parse(cleaned) as {
           winnerIndex?: number;
           summary?: string;
+          differences?: string[];
           scores?: Array<{ index: number; score: number; rationale: string }>;
         };
         if (typeof parsed.winnerIndex === "number" && Array.isArray(parsed.scores)) {
           return {
             winnerIndex: Math.max(0, Math.min(input.candidates.length - 1, parsed.winnerIndex)),
             summary: parsed.summary ?? "Judge evaluation complete.",
+            differences: Array.isArray(parsed.differences) ? parsed.differences : [],
             scores: parsed.scores,
           };
         }
@@ -2095,6 +2096,9 @@ export function createProjectsService(prisma: PrismaClient) {
       return {
         winnerIndex: best.index,
         summary: res.text.slice(0, 240) || "Compared all candidates on clarity and completeness.",
+        differences: input.candidates.map(
+          (c) => `${c.modelLabel}: ${c.text.length} chars — ${c.text.slice(0, 90).replace(/\s+/g, " ")}…`,
+        ),
         scores: fallbackScores,
       };
     },
@@ -2105,7 +2109,14 @@ export function createProjectsService(prisma: PrismaClient) {
         projectId: string;
         sourceBranchId: string;
         targetBranchId: string;
-        strategy: "ai_assisted" | "replace" | "append" | "insert";
+        strategy:
+          | "ai_assisted"
+          | "replace"
+          | "insert_before"
+          | "insert_after"
+          | "insert"
+          | "append"
+          | "manual";
         selectedText: string;
         selectedBlocks?: MergeSourceBlock[];
         previewBase?: MergePreviewBase;
@@ -2206,12 +2217,11 @@ export function createProjectsService(prisma: PrismaClient) {
       const savedSelection = sourceBranch.forkOrigin?.selectionRangeJson;
       const selection = SelectionBlockRangeSchema.safeParse(savedSelection).data;
       const originMessageId = sourceBranch.forkOrigin?.sourceMessageId;
+      const resolvedTargetId = input.previewBase?.messageId ?? originMessageId ?? undefined;
       const targetMsg = await prisma.message.findFirst({
         where: {
           threadId: targetBranch.threadId,
-          ...(input.previewBase || originMessageId
-            ? { id: input.previewBase?.messageId ?? originMessageId }
-            : { role: "assistant" }),
+          ...(resolvedTargetId ? { id: resolvedTargetId } : { role: "assistant" }),
         },
         orderBy: { seq: "desc" },
         select: { id: true, blocks: true, activeRevisionId: true },
@@ -2307,12 +2317,6 @@ export function createProjectsService(prisma: PrismaClient) {
       if (input.finalAfterText !== undefined) {
         afterText = input.finalAfterText.trim();
       } else if (input.strategy !== "ai_assisted") {
-        if (anchored && savedSelection && !matchingBlock) {
-          throw new ORPCError("CONFLICT", {
-            message:
-              "The branch point is missing or ambiguous. Choose Place manually to set the position in the draft.",
-          });
-        }
         afterText = placeMergeText(beforeText, incoming, input.strategy, selection);
       } else {
         const focusQuote = selection?.quoteText;
@@ -2354,12 +2358,15 @@ export function createProjectsService(prisma: PrismaClient) {
       try {
         const result = await prisma.$transaction(async (tx) => {
           const nextBlocks = [...blocks];
-          nextBlocks[targetBlock.index] = { ...nextBlocks[targetBlock.index], text: afterText };
+          nextBlocks[targetBlock.index] = {
+            ...nextBlocks[targetBlock.index],
+            kind: nextBlocks[targetBlock.index]?.kind ?? "text",
+            text: afterText,
+          };
           const updated = await tx.message.updateMany({
             where: {
               id: targetMsg.id,
               activeRevisionId: previewBase.revisionId,
-              blocks: { equals: blocks as object },
             },
             data: { blocks: nextBlocks as object },
           });

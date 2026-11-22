@@ -6,13 +6,45 @@ import { useState } from "react";
 import type { createSpaceRpc } from "../../lib/query/rpc";
 import { NotionBlockCanvas } from "./NotionBlockCanvas";
 
-type MergeStrategy = "ai_assisted" | "replace" | "append" | "insert";
+type MergeStrategy =
+  | "replace"
+  | "insert_before"
+  | "insert_after"
+  | "append"
+  | "manual"
+  | "ai_assisted";
 
-const placements: { id: MergeStrategy; label: string }[] = [
-  { id: "insert", label: "Insert at branch point" },
-  { id: "replace", label: "Replace highlighted text" },
-  { id: "append", label: "Place manually" },
-  { id: "ai_assisted", label: "Blend with AI" },
+const placements: { id: MergeStrategy; label: string; hint: string }[] = [
+  {
+    id: "replace",
+    label: "Replace highlighted text",
+    hint: "Replaces the highlighted text in Main",
+  },
+  {
+    id: "insert_before",
+    label: "Insert above branch point",
+    hint: "Adds as a separate block directly above where you branched",
+  },
+  {
+    id: "insert_after",
+    label: "Insert below branch point",
+    hint: "Adds as a separate block directly below where you branched",
+  },
+  {
+    id: "append",
+    label: "Add to bottom of Main",
+    hint: "Adds as a separate block at the end of Main's response",
+  },
+  {
+    id: "manual",
+    label: "Place manually in Canvas",
+    hint: "Opens the full Notion BlockNote Canvas so you drag it anywhere",
+  },
+  {
+    id: "ai_assisted",
+    label: "Blend with AI",
+    hint: "Weaves the new content smoothly into Main's surrounding prose",
+  },
 ];
 
 export function MergeBranchModal({
@@ -51,7 +83,7 @@ export function MergeBranchModal({
     originalMarkdown: string,
   ) => Promise<void>;
 }) {
-  const [strategy, setStrategy] = useState<MergeStrategy>("insert");
+  const [strategy, setStrategy] = useState<MergeStrategy>("insert_after");
   const [selectedText, setSelectedText] = useState(initialSelectedText);
   const [instructions, setInstructions] = useState("");
   const [archiveAfterMerge, setArchiveAfterMerge] = useState(true);
@@ -251,17 +283,22 @@ export function MergeBranchModal({
               </label>
             )}
             <fieldset className="grid gap-2 sm:grid-cols-2">
-              <legend className="mb-2 text-sm font-medium">Placement</legend>
+              <legend className="mb-2 text-sm font-medium">Where should this go in Main?</legend>
               {placements.map((placement) => (
-                <Button
+                <button
                   type="button"
                   key={placement.id}
-                  variant={strategy === placement.id ? "default" : "outline"}
                   aria-pressed={strategy === placement.id}
                   onClick={() => setStrategy(placement.id)}
+                  className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors ${
+                    strategy === placement.id
+                      ? "border-success/70 bg-success/10 text-foreground"
+                      : "border-border bg-background/40 text-foreground hover:bg-muted/50"
+                  }`}
                 >
-                  {placement.label}
-                </Button>
+                  <span className="text-xs font-semibold">{placement.label}</span>
+                  <span className="mt-0.5 text-[11px] text-muted-foreground">{placement.hint}</span>
+                </button>
               ))}
             </fieldset>
             {strategy === "append" ? (

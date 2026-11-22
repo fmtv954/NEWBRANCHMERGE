@@ -140,6 +140,7 @@ export const Transcript = memo(function Transcript({
   onRemovePlacement,
   onCommitMessageMarkdown,
   onOpenRearrangeCanvas,
+  onRegenerateMessage,
   onDismissMergeReceipt,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
@@ -224,6 +225,7 @@ export const Transcript = memo(function Transcript({
     client?: RpcClient,
   ) => Promise<void>;
   onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
+  onRegenerateMessage?: (message: ThreadMessage) => void;
   onDismissMergeReceipt?: (receiptId: string) => void;
 }) {
   const { t } = useLingui();
@@ -769,6 +771,7 @@ export const Transcript = memo(function Transcript({
                       reviewBlocksActive={reviewBlocksOpen}
                       onCommitMessageMarkdown={onCommitMessageMarkdown}
                       onOpenRearrangeCanvas={onOpenRearrangeCanvas}
+                      onRegenerate={onRegenerateMessage}
                       onBranchBlockText={
                         onInstantBranch
                           ? (msg, quoteText, sourceMarkdown) =>

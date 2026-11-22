@@ -20,6 +20,7 @@ import {
   GitMerge,
   Loader2,
   Pencil,
+  RotateCw,
   Scissors,
   SlidersHorizontal,
   Sparkles,
@@ -224,10 +225,10 @@ export function SideBranchPane({
     }
   }
 
-  async function handleSend() {
-    const prompt = draft.trim();
+  async function handleSend(overridePrompt?: string) {
+    const prompt = (overridePrompt ?? draft).trim();
     if (!prompt || sending) return;
-    setDraft("");
+    if (!overridePrompt) setDraft("");
     setError(null);
     const tempId = `temp_u_${Date.now()}`;
     setMessages((prev) => [...prev, { id: tempId, role: "user", text: prompt }]);
@@ -402,7 +403,7 @@ export function SideBranchPane({
                         return (
                           <div
                             key={block.blockId}
-                            className={`flex items-start gap-2 rounded-lg border border-border bg-card px-2.5 py-2 ${checked ? "ring-1 ring-success/60" : ""}`}
+                            className={`flex items-start gap-2 rounded-lg px-1.5 py-1 transition-colors hover:bg-muted/35 ${checked ? "bg-success/10 ring-1 ring-success/50" : ""}`}
                           >
                             <Checkbox
                               checked={checked}
@@ -473,7 +474,25 @@ export function SideBranchPane({
                     className="h-6 gap-1 px-2 text-[10px]"
                   >
                     <BookmarkPlus className="size-3" />
-                    <span>{selectedSegments.length ? "Append selected" : "Append reply"}</span>
+                    <span>{selectedSegments.length ? "Add selected to bottom" : "Add to bottom"}</span>
+                  </Button>
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={sending}
+                    onClick={() => {
+                      const msgIdx = messages.findIndex((m) => m.id === msg.id);
+                      const prevUser = [...messages.slice(0, msgIdx)]
+                        .reverse()
+                        .find((m) => m.role === "user");
+                      if (prevUser?.text) void handleSend(prevUser.text);
+                    }}
+                    className="h-6 gap-1 px-2 text-[10px] text-sky-400 hover:text-sky-300"
+                  >
+                    <RotateCw className="size-3" />
+                    <span>Regenerate</span>
                   </Button>
                 </div>
               ) : null}

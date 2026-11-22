@@ -327,6 +327,7 @@ export const projectsRpc = {
         z.object({
           winnerIndex: z.number().int().nonnegative(),
           summary: z.string(),
+          differences: z.array(z.string()).default([]),
           scores: z.array(
             z.object({
               index: z.number().int().nonnegative(),
@@ -436,7 +437,15 @@ export const projectsRpc = {
           projectId: Id,
           sourceBranchId: Id,
           targetBranchId: Id,
-          strategy: z.enum(["ai_assisted", "replace", "append", "insert"]),
+          strategy: z.enum([
+            "ai_assisted",
+            "replace",
+            "insert_before",
+            "insert_after",
+            "insert",
+            "append",
+            "manual",
+          ]),
           selectedText: z.string().min(1).max(40_000),
           selectedBlocks: z.array(MergeSourceBlockSchema).min(1).optional(),
           finalAfterText: z.string().max(80_000).optional(),

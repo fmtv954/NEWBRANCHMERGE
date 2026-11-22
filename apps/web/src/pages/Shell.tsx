@@ -1439,6 +1439,26 @@ function SpaceShell() {
                   setStandaloneCanvasMessage({ messageId, markdown, blockIndex });
                   setMergeModalOpen(true);
                 }}
+                onRegenerateMessage={async (targetMsg) => {
+                  if (!active?.id) return;
+                  const msgs = activeSnapshot?.messages ?? [];
+                  const idx = msgs.findIndex((m) => m.id === targetMsg.id);
+                  const prevUser = [...msgs.slice(0, idx >= 0 ? idx : msgs.length)]
+                    .reverse()
+                    .find((m) => m.role === "user");
+                  const promptText = prevUser?.blocks
+                    .filter((b) => b.kind === "text" && "text" in b)
+                    .map((b) => ("text" in b ? b.text : ""))
+                    .join("\n\n")
+                    .trim();
+                  if (!promptText) return;
+                  await rpc.threads.send({
+                    botId: active.id,
+                    text: promptText,
+                    clientNonce: crypto.randomUUID(),
+                  });
+                  await refreshActiveThread();
+                }}
                 onDismissMergeReceipt={(receiptId) => {
                   setMergeReceipts((prev) => prev.filter((r) => r.id !== receiptId));
                 }}

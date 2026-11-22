@@ -99,6 +99,7 @@ export const MessageView = memo(function MessageView({
   reviewBlocksActive,
   onCommitMessageMarkdown,
   onOpenRearrangeCanvas,
+  onRegenerate,
   onBranchBlockText,
 }: {
   artifactTarget: ArtifactTarget;
@@ -166,6 +167,7 @@ export const MessageView = memo(function MessageView({
     client?: RpcClient,
   ) => Promise<void>;
   onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
+  onRegenerate?: (message: ThreadMessage) => void;
   onBranchBlockText?: (message: ThreadMessage, quote: string, sourceMarkdown: string) => void;
 }) {
   const { t } = useLingui();
@@ -317,6 +319,7 @@ export const MessageView = memo(function MessageView({
           onCommitMarkdown={onCommitMessageMarkdown}
           onRestoredRevision={onRefresh}
           onOpenRearrangeCanvas={onOpenRearrangeCanvas}
+          onRegenerate={onRegenerate ? () => onRegenerate(message) : undefined}
         />
       );
     }
@@ -701,14 +704,23 @@ export const MessageView = memo(function MessageView({
             );
           }
           if (block.kind === "text") {
+            const isRawCanvas = !isLive && Boolean(onCommitMessageMarkdown);
             return (
               <div
                 key={i}
-                className="relative flex w-fit max-w-full justify-start has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full [@media(hover:none)]:flex-wrap"
+                className={cn(
+                  "relative flex justify-start [@media(hover:none)]:w-full [@media(hover:none)]:flex-wrap",
+                  isRawCanvas ? "w-full max-w-full" : "w-fit max-w-full",
+                )}
               >
                 <div
                   data-testid="message-bot-bubble"
-                  className="max-w-full rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground has-data-[canvas-editing]:w-full"
+                  className={cn(
+                    "max-w-full text-body-lg text-foreground",
+                    isRawCanvas
+                      ? "w-full bg-transparent px-0 py-1"
+                      : "rounded-2xl bg-muted px-[18px] py-3",
+                  )}
                   dir="auto"
                 >
                   <div data-quote-message-id={quoteMessageId}>{renderTextBlock(block)}</div>

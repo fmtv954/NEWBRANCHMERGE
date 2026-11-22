@@ -15,6 +15,7 @@ export function NotionBlockCanvas({
   onReadyChange,
   onBranch,
   disabled,
+  variant = "studio",
 }: {
   initialMarkdown: string;
   originalMarkdown?: string;
@@ -22,6 +23,7 @@ export function NotionBlockCanvas({
   onReadyChange?: (ready: boolean) => void;
   onBranch?: (quote: string) => void;
   disabled?: boolean;
+  variant?: "studio" | "raw";
 }) {
   const editor = useCreateBlockNote();
   const theme = useAppTheme();
@@ -110,7 +112,8 @@ export function NotionBlockCanvas({
     .join(",");
   return (
     <div className="flex min-h-0 flex-col" data-merge-canvas={canvasId}>
-      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/40 px-2 py-1">
+      {variant === "studio" ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/40 px-2 py-1">
         <Button
           type="button"
           size="xs"
@@ -185,6 +188,7 @@ export function NotionBlockCanvas({
           </Button>
         ) : null}
       </div>
+      ) : null}
       {error ? (
         <p role="alert" className="px-4 py-2 text-sm text-destructive">
           {error}
@@ -202,7 +206,11 @@ export function NotionBlockCanvas({
           setFocusedBlockId(editor.getTextCursorPosition().block.id);
         }}
         onSelectionChange={() => setFocusedBlockId(editor.getTextCursorPosition().block.id)}
-        className="min-w-0 bg-background py-3 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-10 [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-2 [&_.bn-block-content]:py-1"
+        className={
+          variant === "raw"
+            ? "min-w-0 bg-transparent py-0.5 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-7 [&_.bn-editor]:text-[15px] [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-1 [&_.bn-block-content]:py-0.5"
+            : "min-w-0 bg-background py-3 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-10 [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-2 [&_.bn-block-content]:py-1"
+        }
       />
     </div>
   );
