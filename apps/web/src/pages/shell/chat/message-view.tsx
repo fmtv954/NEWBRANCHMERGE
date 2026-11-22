@@ -16,7 +16,6 @@ import { UserRound } from "lucide-react";
 import { memo, useCallback, useMemo, useState } from "react";
 import { A2uiSurfaceCard } from "../../../components/a2ui/A2uiSurfaceCard";
 import { CollaborationMarker } from "../../../components/ai/CollaborationMarker";
-import { BlockReviewCard } from "../../../components/branching/BlockReviewCard";
 import { SmartSegmentedMessage } from "../../../components/branching/SmartSegmentedMessage";
 import { ComputerCard } from "../../../components/computers/ComputerCard";
 import { ArtifactFileCard } from "../../../components/messages/ArtifactFileCard";
@@ -100,6 +99,7 @@ export const MessageView = memo(function MessageView({
   reviewBlocksActive = false,
   onSaveBlockOrder,
   onCommitMessageMarkdown,
+  onOpenRearrangeCanvas,
   onBranchBlockText,
 }: {
   artifactTarget: ArtifactTarget;
@@ -161,6 +161,7 @@ export const MessageView = memo(function MessageView({
   reviewBlocksActive?: boolean;
   onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
   onCommitMessageMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
+  onOpenRearrangeCanvas?: (messageId: string, markdown: string) => void;
   onBranchBlockText?: (message: ThreadMessage, blockText: string) => void;
 }) {
   const { t } = useLingui();
@@ -497,9 +498,8 @@ export const MessageView = memo(function MessageView({
             );
           }
           if (block.kind === "choice") {
-            const botId = "botId" in artifactTarget ? artifactTarget.botId : message.botId;
-            if (!botId) return null;
-            return <ChoiceCard key={i} botId={botId} block={block} onBotChanged={onBotChanged} />;
+            // Suppress the generic "What would you like this agent to do for you?" onboarding card.
+            return null;
           }
           if (block.kind === "app_connect") {
             const botId = "botId" in artifactTarget ? artifactTarget.botId : message.botId;
@@ -681,6 +681,7 @@ export const MessageView = memo(function MessageView({
                         }
                         onCommitMarkdown={onCommitMessageMarkdown}
                         onRestoredRevision={onRefresh}
+                        onOpenRearrangeCanvas={onOpenRearrangeCanvas}
                       />
                     ) : (
                       <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
@@ -773,28 +774,6 @@ export const MessageView = memo(function MessageView({
         })}
         {hoverAnchorIndex === -1 ? hoverActions : null}
       </div>
-      {(localBlockReview || reviewBlocksActive) &&
-      !isLive &&
-      message.blocks.some((b) => b.kind === "text" && b.text.trim()) ? (
-        <div className="mt-2">
-          <BlockReviewCard
-            messageId={message.id}
-            markdown={message.blocks
-              .filter((b): b is Extract<MessageBlock, { kind: "text" }> => b.kind === "text")
-              .map((b) => b.text)
-              .join("\n\n")}
-            onSaveOrder={async (orderedBlockIds) => {
-              if (onSaveBlockOrder) {
-                await onSaveBlockOrder(message.id, orderedBlockIds);
-              }
-            }}
-            onBranchBlock={
-              onBranchBlockText ? (blockText) => onBranchBlockText(message, blockText) : undefined
-            }
-            onClose={() => setLocalBlockReview(false)}
-          />
-        </div>
-      ) : null}
       {pageCards}
     </>
   );

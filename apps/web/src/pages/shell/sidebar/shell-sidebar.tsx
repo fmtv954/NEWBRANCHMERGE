@@ -10,9 +10,9 @@ import {
   InputGroupInput,
   Sidebar,
 } from "@rakazo/ui-web";
-import { ChevronDown, ChevronRight, Film, FolderInput, FolderKanban, GitBranch, MessageSquarePlus, Plus, Search, SlidersHorizontal } from "lucide-react";
+import { BookOpen, ChevronDown, ChevronRight, FileUp, Film, FolderInput, FolderKanban, GitBranch, MessageSquarePlus, Plus, Search, SlidersHorizontal, Trash2 } from "lucide-react";
 import type { ReactNode, UIEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PasskeyOffer } from "../../../components/account/PasskeyOffer";
 import { useUsageHint } from "../../../components/billing/PlanUsage";
 import { useBilling } from "../../../components/billing/SubscriptionGate";
@@ -97,6 +97,8 @@ export function ShellSidebar({
   onSelectBranch,
   studioOpen,
   onToggleStudio,
+  onOpenKnowledge,
+  onRefreshBots,
 }: {
   isMobile: boolean;
   mobileOpen: boolean;
@@ -136,6 +138,8 @@ export function ShellSidebar({
   onSelectBranch?: (branchId: string) => void;
   studioOpen?: boolean;
   onToggleStudio?: () => void;
+  onOpenKnowledge?: () => void;
+  onRefreshBots?: () => Promise<void> | void;
 }) {
   const { t } = useLingui();
   const {
@@ -327,6 +331,7 @@ export function ShellSidebar({
                     setMobileOpen(false);
                     navigate(`/app/${botId}`);
                   }}
+                  onRefreshBots={onRefreshBots}
                 />
               ) : null}
               {roster}
@@ -389,8 +394,26 @@ export function ShellSidebar({
         >
           {archived}
         </div>
-        {onToggleStudio ? (
-          <div className="px-2.5 pb-1.5">
+        <div className="space-y-1 px-2.5 pb-1.5">
+          {onOpenKnowledge ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label="Knowledge Base"
+              onClick={() => {
+                onOpenKnowledge();
+                setMobileOpen(false);
+              }}
+              className={`h-8 w-full justify-start gap-2 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground ${
+                mini ? "justify-center px-0" : "px-2.5"
+              }`}
+            >
+              <BookOpen className="size-3.5 shrink-0" />
+              {!mini ? <span className="truncate">Knowledge Base</span> : null}
+            </Button>
+          ) : null}
+          {onToggleStudio ? (
             <Button
               type="button"
               variant={studioOpen ? "default" : "outline"}
@@ -408,8 +431,8 @@ export function ShellSidebar({
               <Film className="size-3.5 shrink-0" />
               {!mini ? <span className="truncate">Microdrama Studio</span> : null}
             </Button>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
         <div className={mini ? "hidden" : "contents"}>
           <PasskeyOffer />
         </div>
@@ -452,6 +475,8 @@ function ShellSidebarFooter({
   onSelectBranch,
   studioOpen,
   onToggleStudio,
+  onOpenKnowledge,
+  onRefreshBots,
 }: {
   mini: boolean;
   logos: Array<{ name: string; logo?: string | null }>;
@@ -473,6 +498,8 @@ function ShellSidebarFooter({
   onSelectBranch?: (branchId: string) => void;
   studioOpen?: boolean;
   onToggleStudio?: () => void;
+  onOpenKnowledge?: () => void;
+  onRefreshBots?: () => Promise<void> | void;
 }) {
   const { t, i18n } = useLingui();
   const userId = useQueryUserId();
@@ -607,6 +634,7 @@ function ProjectsAndChatsShelf({
   onToggleSection,
   onSelectProject,
   onOpenChat,
+  onRefreshBots,
 }: {
   rpc: ReturnType<typeof createSpaceRpc>;
   bots: Bot[];
@@ -616,6 +644,7 @@ function ProjectsAndChatsShelf({
   onToggleSection: (key: string) => void;
   onSelectProject: (project: Project) => void;
   onOpenChat: (botId: string) => void;
+  onRefreshBots?: () => Promise<void> | void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [independentChats, setIndependentChats] = useState<
@@ -625,6 +654,7 @@ function ProjectsAndChatsShelf({
   const [newProjectTitle, setNewProjectTitle] = useState("");
   const [newProjectMode, setNewProjectMode] = useState<"general" | "microdrama">("general");
   const [busy, setBusy] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -646,9 +676,7 @@ function ProjectsAndChatsShelf({
     if (busy) return;
     setBusy(true);
     try {
-      const created = await rpc.projects.createIndependentChat({
-        assistantBotId: bots[0]?.id,
-      });
+      const created = await rpc.projects.createIndependentChat({});
       setIndependentChats((prev) => [
         {
           threadId: created.threadId,
@@ -657,9 +685,53 @@ function ProjectsAndChatsShelf({
         },
         ...prev,
       ]);
+      await onRefreshBots?.();
       onOpenChat(created.assistantBotId);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleStartFromUpload(file: File) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const cleanName = file.name.replace(/\.[^.]+$/, "").slice(0, 48) || "Uploaded Document";
+      const created = await rpc.projects.createIndependentChat({ title: cleanName });
+      let textPreview = "";
+      if (file.type.startsWith("text/") || /\.(md|txt|csv|json|ts|tsx|js|py|html|css)$/i.test(file.name)) {
+        textPreview = (await file.text()).slice(0, 12_000);
+      }
+      setIndependentChats((prev) => [
+        {
+          threadId: created.threadId,
+          assistantBotId: created.assistantBotId,
+          title: cleanName,
+        },
+        ...prev,
+      ]);
+      await onRefreshBots?.();
+      onOpenChat(created.assistantBotId);
+      const introPrompt = textPreview
+        ? `I uploaded "${file.name}". Please summarize the key points and let me know what we can explore:\n\n\`\`\`\n${textPreview}\n\`\`\``
+        : `I uploaded "${file.name}" (${Math.max(1, Math.round(file.size / 1024))} KB). Let's start a focused conversation about this document.`;
+      await rpc.threads.send({
+        botId: created.assistantBotId,
+        text: introPrompt,
+        clientNonce: crypto.randomUUID(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteChat(botId: string) {
+    try {
+      await rpc.bots.remove({ botId, deleteMemories: true });
+      setIndependentChats((prev) => prev.filter((c) => c.assistantBotId !== botId));
+      await onRefreshBots?.();
+    } catch {
+      // ignore if already deleted
     }
   }
 
@@ -684,6 +756,17 @@ function ProjectsAndChatsShelf({
 
   return (
     <div className="mb-2 space-y-1.5 border-b border-sidebar-border/60 pb-2">
+      <input
+        ref={uploadInputRef}
+        type="file"
+        className="hidden"
+        accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.ts,.tsx,.js,.py"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) void handleStartFromUpload(f);
+        }}
+      />
       <div className="grid grid-cols-2 gap-1.5 px-1">
         <Button
           type="button"
@@ -701,10 +784,23 @@ function ProjectsAndChatsShelf({
           variant="outline"
           size="sm"
           disabled={busy}
-          onClick={() => setCreatingProject((open) => !open)}
+          onClick={() => uploadInputRef.current?.click()}
           className="h-7 justify-start gap-1.5 px-2 text-xs"
         >
-          <Plus className="size-3.5" />
+          <FileUp className="size-3.5" />
+          <span className="truncate">From Upload</span>
+        </Button>
+      </div>
+      <div className="px-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => setCreatingProject((open) => !open)}
+          className="h-6 w-full justify-start gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <Plus className="size-3" />
           <span className="truncate">New Project</span>
         </Button>
       </div>
@@ -830,15 +926,28 @@ function ProjectsAndChatsShelf({
           {!chatsCollapsed ? (
             <div className="space-y-0.5">
               {independentChats.map((chat) => (
-                <button
+                <div
                   key={chat.threadId}
-                  type="button"
-                  onClick={() => onOpenChat(chat.assistantBotId)}
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-sidebar-foreground hover:bg-sidebar-accent/50"
+                  className="group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/50"
                 >
-                  <MessageSquarePlus className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate">{chat.title}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenChat(chat.assistantBotId)}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    <MessageSquarePlus className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                  <button
+                    type="button"
+                    title="Delete chat"
+                    aria-label={`Delete ${chat.title}`}
+                    onClick={() => void handleDeleteChat(chat.assistantBotId)}
+                    className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                  >
+                    <Trash2 className="size-3" />
+                  </button>
+                </div>
               ))}
             </div>
           ) : null}

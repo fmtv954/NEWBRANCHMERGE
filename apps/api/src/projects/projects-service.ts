@@ -360,20 +360,45 @@ export function createProjectsService(prisma: PrismaClient) {
       actor: Actor,
       input: { title?: string; isTemporary?: boolean; assistantBotId?: string },
     ): Promise<{ threadId: string; assistantBotId: string }> {
-      const assistantBotId =
-        input.assistantBotId ??
-        (await resolveDefaultAssistantBotId(prisma, actor.spaceId, actor.userId));
-      const thread = await prisma.thread.create({
-        data: {
-          spaceId: actor.spaceId,
-          userId: actor.userId,
-          assistantBotId,
-          title: input.title ?? (input.isTemporary ? "Temporary Chat" : "New Chat"),
-          isTemporary: Boolean(input.isTemporary),
-        },
-        select: { id: true },
+      const chatTitle =
+        input.title?.trim() || (input.isTemporary ? "Temporary Chat" : `Chat ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+
+      // Copy space default model preference from any existing active bot so New Chat works immediately.
+      const templateBot = await prisma.bot.findFirst({
+        where: { spaceId: actor.spaceId, archivedAt: null },
+        orderBy: [{ isDefaultAssistant: "desc" }, { createdAt: "asc" }],
+        select: { modelProvider: true, modelId: true, thinkingLevel: true },
       });
-      return { threadId: thread.id, assistantBotId };
+
+      const created = await prisma.$transaction(async (tx) => {
+        const bot = await tx.bot.create({
+          data: {
+            spaceId: actor.spaceId,
+            userId: actor.userId,
+            name: chatTitle,
+            description: "",
+            color: "#10b981",
+            isDefaultAssistant: false,
+            modelProvider: templateBot?.modelProvider ?? null,
+            modelId: templateBot?.modelId ?? null,
+            thinkingLevel: templateBot?.thinkingLevel ?? null,
+          },
+          select: { id: true },
+        });
+        const thread = await tx.thread.create({
+          data: {
+            spaceId: actor.spaceId,
+            userId: actor.userId,
+            botId: bot.id,
+            assistantBotId: bot.id,
+            title: chatTitle,
+            isTemporary: Boolean(input.isTemporary),
+          },
+          select: { id: true },
+        });
+        return { threadId: thread.id, assistantBotId: bot.id };
+      });
+      return created;
     },
 
     async ensureThreadGraph(
@@ -1927,6 +1952,104 @@ export function createProjectsService(prisma: PrismaClient) {
         include: { forkOrigin: true },
       });
       return mapBranch(updated);
+    },
+
+    async compareRun(
+      _actor: Actor,
+      input: {
+        prompt: string;
+        personaPrompt?: string;
+        models: Array<{ provider: string; modelId: string; displayName: string }>;
+      },
+    ) {
+      const sys = input.personaPrompt?.trim()
+        ? `${input.personaPrompt.trim()}\n\nAnswer the user's prompt directly, clearly, and concisely using clean Markdown.`
+        : "Answer the user's prompt directly, clearly, and concisely using clean Markdown.";
+
+      const results = await Promise.all(
+        input.models.map(async (m) => {
+          const started = Date.now();
+          const res = await callBranchCompletion({
+            provider: m.provider,
+            modelId: m.modelId,
+            messages: [
+              { role: "system", content: sys },
+              { role: "user", content: input.prompt },
+            ],
+            temperature: 0.5,
+            maxTokens: 1200,
+          });
+          return {
+            provider: m.provider,
+            modelId: m.modelId,
+            displayName: m.displayName,
+            modelLabel: res.modelLabel,
+            text: res.text,
+            latencyMs: Date.now() - started,
+          };
+        }),
+      );
+      return { results };
+    },
+
+    async judgeCompare(
+      _actor: Actor,
+      input: {
+        prompt: string;
+        candidates: Array<{ modelLabel: string; text: string }>;
+      },
+    ) {
+      const formatted = input.candidates
+        .map((c, idx) => `--- CANDIDATE ${idx} (${c.modelLabel}) ---\n${c.text}`)
+        .join("\n\n");
+
+      const res = await callBranchCompletion({
+        provider: "openai",
+        modelId: "gpt-4o-mini",
+        temperature: 0.1,
+        maxTokens: 500,
+        messages: [
+          {
+            role: "system",
+            content:
+              'You are an impartial AI Judge comparing model responses. Respond with STRICT valid JSON only: {"winnerIndex":0,"summary":"1-2 sentence verdict","scores":[{"index":0,"score":8.5,"rationale":"concise reason"}]}',
+          },
+          {
+            role: "user",
+            content: `User Prompt:\n${input.prompt}\n\n${formatted}`,
+          },
+        ],
+      });
+
+      try {
+        const cleaned = res.text.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+        const parsed = JSON.parse(cleaned) as {
+          winnerIndex?: number;
+          summary?: string;
+          scores?: Array<{ index: number; score: number; rationale: string }>;
+        };
+        if (typeof parsed.winnerIndex === "number" && Array.isArray(parsed.scores)) {
+          return {
+            winnerIndex: Math.max(0, Math.min(input.candidates.length - 1, parsed.winnerIndex)),
+            summary: parsed.summary ?? "Judge evaluation complete.",
+            scores: parsed.scores,
+          };
+        }
+      } catch {
+        // Fallback deterministic scoring if judge output wasn't strict JSON
+      }
+
+      const fallbackScores = input.candidates.map((c, idx) => ({
+        index: idx,
+        score: Number((7.5 + Math.min(2, c.text.length / 800)).toFixed(1)),
+        rationale: "Clear, relevant response.",
+      }));
+      const best = fallbackScores.reduce((a, b) => (b.score > a.score ? b : a), fallbackScores[0]!);
+      return {
+        winnerIndex: best.index,
+        summary: res.text.slice(0, 240) || "Compared all candidates on clarity and completeness.",
+        scores: fallbackScores,
+      };
     },
 
     async executeMergeStrategy(

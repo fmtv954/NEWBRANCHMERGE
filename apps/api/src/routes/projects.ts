@@ -72,6 +72,12 @@ export function projectsRoutes(ctx: RouterContext) {
       archive: authed.branches.archive.handler(({ context, input }) =>
         service.archiveBranch(context.actor, input),
       ),
+      compareRun: authed.branches.compareRun.handler(({ context, input }) =>
+        service.compareRun(context.actor, input),
+      ),
+      judgeCompare: authed.branches.judgeCompare.handler(({ context, input }) =>
+        service.judgeCompare(context.actor, input),
+      ),
     },
     placements: {
       list: authed.placements.list.handler(({ context, input }) =>

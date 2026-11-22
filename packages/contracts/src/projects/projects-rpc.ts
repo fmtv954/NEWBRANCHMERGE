@@ -273,6 +273,65 @@ export const projectsRpc = {
     archive: oc
       .input(z.object({ branchId: Id, archived: z.boolean() }))
       .output(BranchSchema),
+    compareRun: oc
+      .input(
+        z.object({
+          prompt: z.string().min(1).max(20_000),
+          personaPrompt: z.string().max(8_000).optional(),
+          models: z
+            .array(
+              z.object({
+                provider: z.string(),
+                modelId: z.string(),
+                displayName: z.string(),
+              }),
+            )
+            .min(2)
+            .max(4),
+        }),
+      )
+      .output(
+        z.object({
+          results: z.array(
+            z.object({
+              provider: z.string(),
+              modelId: z.string(),
+              displayName: z.string(),
+              modelLabel: z.string(),
+              text: z.string(),
+              latencyMs: z.number().int().nonnegative(),
+            }),
+          ),
+        }),
+      ),
+    judgeCompare: oc
+      .input(
+        z.object({
+          prompt: z.string().min(1).max(20_000),
+          candidates: z
+            .array(
+              z.object({
+                modelLabel: z.string(),
+                text: z.string(),
+              }),
+            )
+            .min(2)
+            .max(4),
+        }),
+      )
+      .output(
+        z.object({
+          winnerIndex: z.number().int().nonnegative(),
+          summary: z.string(),
+          scores: z.array(
+            z.object({
+              index: z.number().int().nonnegative(),
+              score: z.number(),
+              rationale: z.string(),
+            }),
+          ),
+        }),
+      ),
   },
   placements: {
     list: oc.input(z.object({ branchId: Id })).output(z.array(PlacementSchema)),

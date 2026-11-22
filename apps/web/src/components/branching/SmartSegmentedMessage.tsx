@@ -6,6 +6,7 @@ import {
   GitBranch,
   GripVertical,
   History,
+  Maximize2,
   Pencil,
   RotateCcw,
   Trash2,
@@ -31,6 +32,7 @@ export function SmartSegmentedMessage({
   onBranchSegment,
   onCommitMarkdown,
   onRestoredRevision,
+  onOpenRearrangeCanvas,
 }: {
   messageId: string;
   markdown: string;
@@ -41,6 +43,7 @@ export function SmartSegmentedMessage({
   onBranchSegment?: (quoteText: string) => void;
   onCommitMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
   onRestoredRevision?: () => Promise<void>;
+  onOpenRearrangeCanvas?: (messageId: string, markdown: string) => void;
 }) {
   const parsed = useMemo(() => buildSmartSegments(markdown), [markdown]);
   const [segments, setSegments] = useState<SmartSegment[]>(parsed);
@@ -255,9 +258,20 @@ export function SmartSegmentedMessage({
         })}
       </div>
 
-      {/* Subtle Version History / Visual Spine pill (shown on hover or when v2+) */}
+      {/* Subtle Rearrange Canvas + Version History pill (shown on hover or when v2+) */}
       {projectId && branchId ? (
-        <div className="mt-1 flex items-center justify-end">
+        <div className="mt-1 flex items-center justify-end gap-1.5">
+          {onOpenRearrangeCanvas ? (
+            <button
+              type="button"
+              title="Open 90% Notion Block Canvas Studio to rearrange blocks or split sentences"
+              onClick={() => onOpenRearrangeCanvas(messageId, joinSmartSegments(segments))}
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-success group-hover/canvas:opacity-90"
+            >
+              <Maximize2 className="size-2.5" />
+              <span>Rearrange Canvas</span>
+            </button>
+          ) : null}
           <Popover
             open={historyOpen}
             onOpenChange={(next) => {

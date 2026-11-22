@@ -44,6 +44,7 @@ import {
 } from "react";
 import { useParams } from "react-router-dom";
 import { CallCard, CallReturnBar } from "../components/call/CallCard";
+import { CompareModelsArena } from "../components/branching/CompareModelsArena";
 import { MergeBranchModal } from "../components/branching/MergeBranchModal";
 import { SideBranchPane } from "../components/branching/SideBranchPane";
 import { IncomingCall } from "../components/call/IncomingCall";
@@ -232,17 +233,28 @@ function SpaceShell() {
   const [showArchivedBranches, setShowArchivedBranches] = useState(false);
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
   const [mergeModalInitialText, setMergeModalInitialText] = useState("");
+  const [standaloneCanvasMessage, setStandaloneCanvasMessage] = useState<{
+    messageId: string;
+    markdown: string;
+  } | null>(null);
+  const [compareArenaOpen, setCompareArenaOpen] = useState(false);
   const [reviewBlocksOpen, setReviewBlocksOpen] = useState(false);
   const [branchPlacements, setBranchPlacements] = useState<Placement[]>([]);
   const [activeMergeReview, setActiveMergeReview] = useState<MergeReview | null>(null);
   const [mergeReceipts, setMergeReceipts] = useState<MergeReceipt[]>([]);
 
   async function ensureGraphForActiveThread() {
-    if (activeProject && activeBranchId) {
-      return { project: activeProject, branches: projectBranches, activeBranchId };
-    }
     const threadId = activeSnapshot?.threadId;
     if (!threadId) return null;
+    // Strictly verify that the cached graph actually belongs to the active threadId
+    // so we NEVER inherit branches/context from a previously visited chat!
+    if (
+      activeProject &&
+      activeBranchId &&
+      projectBranches.some((b) => b.threadId === threadId)
+    ) {
+      return { project: activeProject, branches: projectBranches, activeBranchId };
+    }
     const ensured = await rpc.projects.ensureThreadGraph({
       threadId,
       title: active?.name ?? activeGroup?.name ?? "Chat",
@@ -736,7 +748,17 @@ function SpaceShell() {
 
   useEffect(() => {
     const threadId = activeSnapshot?.threadId;
-    if (!threadId) return;
+    // Immediately clear stale branch, side-chat, and receipt state on every thread switch
+    setSideBranch(null);
+    setSideBranchFocusQuote(null);
+    setMergeReceipts([]);
+    setBranchPlacements([]);
+    if (!threadId) {
+      setActiveProject(null);
+      setProjectBranches([]);
+      setActiveBranchId(null);
+      return;
+    }
     let cancelled = false;
     void rpc.projects
       .ensureThreadGraph({
@@ -751,13 +773,12 @@ function SpaceShell() {
           .catch(() => ensured.branches);
         if (cancelled) return;
         setProjectBranches(allBranches);
-        const mainB = allBranches.find((b) => b.isMain) ?? allBranches[0] ?? null;
+        const mainB =
+          allBranches.find((b) => b.threadId === threadId) ??
+          allBranches.find((b) => b.isMain) ??
+          allBranches[0] ??
+          null;
         setActiveBranchId(mainB?.id ?? ensured.activeBranchId);
-        setSideBranch(null);
-        if (mainB) {
-          const placed = await rpc.placements.list({ branchId: mainB.id }).catch(() => []);
-          if (!cancelled) setBranchPlacements(placed);
-        }
       })
       .catch(() => undefined);
     return () => {
@@ -1195,6 +1216,8 @@ function SpaceShell() {
         onToggleStudio={() =>
           setPanel(panel === "microdrama-studio" ? null : "microdrama-studio")
         }
+        onOpenKnowledge={() => navigate("/space/knowledge")}
+        onRefreshBots={refreshBots}
         roster={
           <SidebarRoster
             mini={miniSidebar}
@@ -1339,6 +1362,7 @@ function SpaceShell() {
               }}
               reviewBlocksOpen={reviewBlocksOpen}
               onToggleReviewBlocks={() => setReviewBlocksOpen((v) => !v)}
+              onOpenCompareArena={() => setCompareArenaOpen(true)}
               onCall={(bot) => {
                 if (call?.botId === bot.id) {
                   setCallMinimized(false);
@@ -1403,6 +1427,13 @@ function SpaceShell() {
                   });
                   await refreshActiveThread();
                   toast.success("Main canvas updated");
+                }}
+                onOpenRearrangeCanvas={(messageId, markdown) => {
+                  setStandaloneCanvasMessage({ messageId, markdown });
+                  setMergeModalOpen(true);
+                }}
+                onDismissMergeReceipt={(receiptId) => {
+                  setMergeReceipts((prev) => prev.filter((r) => r.id !== receiptId));
                 }}
                 onBranchCreated={async (createdBranchId) => {
                   if (!activeProject?.id) return;
@@ -1622,7 +1653,7 @@ function SpaceShell() {
                   previewOnly: false,
                 });
                 if (res.receipt) {
-                  setMergeReceipts((prev) => [res.receipt!, ...prev]);
+                  setMergeReceipts([res.receipt]);
                 }
                 await refreshActiveThread();
                 toast.success(
@@ -1643,18 +1674,35 @@ function SpaceShell() {
         </div>
       </main>
 
-      {sideBranch && activeProject ? (
+      {(sideBranch || standaloneCanvasMessage) && activeProject ? (
         <MergeBranchModal
           open={mergeModalOpen}
-          onOpenChange={setMergeModalOpen}
+          onOpenChange={(nextOpen) => {
+            setMergeModalOpen(nextOpen);
+            if (!nextOpen) setStandaloneCanvasMessage(null);
+          }}
           rpc={rpc}
           projectId={activeProject.id}
           sourceBranch={sideBranch}
           targetBranch={projectBranches.find((b) => b.isMain) ?? projectBranches[0] ?? sideBranch}
           initialSelectedText={mergeModalInitialText}
-          onMerged={async ({ receipt, archivedBranchId, placement }) => {
-            if (receipt) setMergeReceipts((prev) => [receipt, ...prev]);
-            if (placement) setBranchPlacements((prev) => [...prev, placement]);
+          standaloneMessage={standaloneCanvasMessage}
+          onSavedStandalone={async (messageId, updatedMarkdown) => {
+            const graph = await ensureGraphForActiveThread();
+            if (!graph) return;
+            await rpc.projects.updateMessageMarkdown({
+              projectId: graph.project.id,
+              branchId: graph.activeBranchId,
+              messageId,
+              updatedMarkdown,
+              sourceAction: "user_edit",
+              idempotencyKey: crypto.randomUUID(),
+            });
+            await refreshActiveThread();
+            toast.success("Main canvas updated");
+          }}
+          onMerged={async ({ receipt, archivedBranchId }) => {
+            if (receipt) setMergeReceipts([receipt]);
             if (archivedBranchId) {
               setSideBranch(null);
               const refreshed = await rpc.branches
@@ -1663,10 +1711,67 @@ function SpaceShell() {
               if (refreshed) setProjectBranches(refreshed);
             }
             await refreshActiveThread();
-            toast.success("Merge committed to Main");
+            toast.success("Merged uniformly into Main");
           }}
         />
       ) : null}
+
+      <CompareModelsArena
+        open={compareArenaOpen}
+        onOpenChange={setCompareArenaOpen}
+        rpc={rpc}
+        activeBot={active}
+        threadId={activeSnapshot?.threadId}
+        onOpenStudio={() => setPanel("microdrama-studio")}
+        onUseWinnerText={async (text) => {
+          const latestAssistant = [...(activeSnapshot?.messages ?? [])]
+            .reverse()
+            .find((m) => m.role === "bot");
+          if (latestAssistant) {
+            const graph = await ensureGraphForActiveThread();
+            if (graph) {
+              const existing = latestAssistant.blocks
+                .filter((b) => b.kind === "text" && "text" in b)
+                .map((b) => ("text" in b ? b.text : ""))
+                .join("\n\n");
+              await rpc.projects.updateMessageMarkdown({
+                projectId: graph.project.id,
+                branchId: graph.activeBranchId,
+                messageId: latestAssistant.id,
+                updatedMarkdown: existing ? `${existing}\n\n${text}` : text,
+                sourceAction: "merge_apply",
+                idempotencyKey: crypto.randomUUID(),
+              });
+              await refreshActiveThread();
+              toast.success("Winner added uniformly to Main");
+              return;
+            }
+          }
+          if (active?.id) {
+            await rpc.threads.send({
+              botId: active.id,
+              text,
+              clientNonce: crypto.randomUUID(),
+            });
+            await refreshActiveThread();
+            toast.success("Winner sent to Main");
+          }
+        }}
+        onAssembleInCanvas={(combinedMarkdown) => {
+          const latestAssistant = [...(activeSnapshot?.messages ?? [])]
+            .reverse()
+            .find((m) => m.role === "bot");
+          if (latestAssistant) {
+            setStandaloneCanvasMessage({
+              messageId: latestAssistant.id,
+              markdown: combinedMarkdown,
+            });
+            setMergeModalOpen(true);
+          } else {
+            toast.success("Copied assembled segments — send a message in Main to arrange on canvas");
+          }
+        }}
+      />
 
       <PageViewHost />
       <CallCard onSettings={() => openSettings("voice")} />
