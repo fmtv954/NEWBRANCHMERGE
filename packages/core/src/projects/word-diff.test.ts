@@ -2,11 +2,23 @@ import { describe, expect, it } from "vitest";
 import { parseMarkdownToCanonicalBlocks } from "../blocks/canonical-blocks.js";
 import {
   applySurgicalSelectionPatch,
+  buildSmartSegments,
   computeWordDiff,
   reorderMarkdownBlocks,
 } from "./word-diff.js";
 
 describe("word-diff & surgical block/selection merge", () => {
+  it("preserves Markdown source when extracting selectable reply blocks", () => {
+    const source =
+      "# Heading\n\nA **formatted** [link](https://example.test).\n\n1. First\n2. Second";
+    expect(buildSmartSegments(source).map((block) => block.markdown)).toEqual([
+      "# Heading",
+      "A **formatted** [link](https://example.test).",
+      "1. First",
+      "2. Second",
+    ]);
+  });
+
   it("computes word-level added, removed, and equal tokens", () => {
     const tokens = computeWordDiff("The hero walks slowly home.", "The hero sprints quickly home.");
     expect(tokens.some((t) => t.kind === "removed" && t.text.includes("walks"))).toBe(true);
@@ -27,7 +39,9 @@ describe("word-diff & surgical block/selection merge", () => {
       mode: "use_branch",
     });
 
-    expect(patched).toBe("Scene 1 opens in rain. The detective kicks the door open. Thunder rolls.");
+    expect(patched).toBe(
+      "Scene 1 opens in rain. The detective kicks the door open. Thunder rolls.",
+    );
   });
 
   it("reorders canonical Markdown blocks cleanly", () => {

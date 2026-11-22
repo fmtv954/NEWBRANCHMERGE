@@ -12,6 +12,7 @@ type MdastNode = {
   type?: string;
   value?: string;
   lang?: string | null;
+  position?: { start: { offset?: number }; end: { offset?: number } };
   children?: MdastNode[];
 };
 
@@ -151,6 +152,13 @@ export function parseMarkdownToCanonicalBlocks(
   markdown: string,
   options?: { seedPrefix?: string },
 ): CanonicalBlock[] {
+  return parseMarkdownWithSource(markdown, options).map(({ block }) => block);
+}
+
+export function parseMarkdownWithSource(
+  markdown: string,
+  options?: { seedPrefix?: string },
+): Array<{ block: CanonicalBlock; markdown: string }> {
   const normalized = markdown.replace(/\r\n?/g, "\n").normalize("NFC");
   if (!normalized.trim()) return [];
 
@@ -167,7 +175,7 @@ export function parseMarkdownToCanonicalBlocks(
   }
 
   const prefix = options?.seedPrefix ?? "blk";
-  const blocks: CanonicalBlock[] = [];
+  const blocks: Array<{ block: CanonicalBlock; markdown: string }> = [];
   for (const node of rawNodes) {
     const blockType = mapBlockType(node.type);
     const canonicalText =
@@ -180,7 +188,7 @@ export function parseMarkdownToCanonicalBlocks(
     const orderIndex = blocks.length;
     const textDigest = sha256Hex(canonicalText);
     const language = blockType === "code" ? (node.lang ?? null) : null;
-    blocks.push({
+    const block: CanonicalBlock = {
       stableBlockId: `${prefix}_${orderIndex}_${blockType}_${textDigest.slice(0, 10)}`,
       blockType,
       orderIndex,
@@ -188,10 +196,24 @@ export function parseMarkdownToCanonicalBlocks(
       ...(language !== null ? { language } : {}),
       textDigest,
       utf16Length: canonicalText.length,
-    });
+    };
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    blocks.push({ block, markdown: normalized.slice(start, end) });
   }
 
   return blocks;
+}
+
+/** Finds the end of the top-level Markdown node containing an offset. */
+export function markdownBlockEndAt(markdown: string, offset: number): number {
+  const document = markdownParser.parse(markdown) as MdastNode;
+  const node = document.children?.find(({ position }) => {
+    const start = position?.start.offset;
+    const end = position?.end.offset;
+    return start !== undefined && end !== undefined && start <= offset && offset < end;
+  });
+  return node?.position?.end.offset ?? markdown.length;
 }
 
 /** Ensures a UTF-16 offset lands cleanly on grapheme & surrogate-pair boundaries. */

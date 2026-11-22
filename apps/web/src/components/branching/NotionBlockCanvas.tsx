@@ -3,152 +3,207 @@ import "@blocknote/mantine/style.css";
 import { BlockNoteView } from "@blocknote/mantine";
 import { useCreateBlockNote } from "@blocknote/react";
 import { Button } from "@rakazo/ui-web";
-import { Scissors, Undo2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, GitBranch, LocateFixed, Scissors, Undo2 } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useAppTheme } from "../../lib/pages/pages";
+import { splitParagraph } from "./sentence-blocks";
 
-/**
- * True Notion-style BlockNote (ProseMirror + Tiptap) Canvas:
- * - Native left-gutter drag handles (⋮⋮) on every Heading, Paragraph, Bullet, Quote & Code block
- * - Full rich formatting + Slash menu (`/`) + atomic Undo/Redo
- * - 1-click "Split into Sentences" tool to break dense paragraphs into movable sentence blocks
- */
 export function NotionBlockCanvas({
   initialMarkdown,
+  originalMarkdown,
   onChangeMarkdown,
-  scrollRef,
-  onScroll,
+  onReadyChange,
+  onBranch,
+  disabled,
 }: {
   initialMarkdown: string;
+  originalMarkdown?: string;
   onChangeMarkdown: (markdown: string) => void;
-  scrollRef?: React.RefObject<HTMLDivElement | null>;
-  onScroll?: () => void;
+  onReadyChange?: (ready: boolean) => void;
+  onBranch?: (quote: string) => void;
+  disabled?: boolean;
 }) {
   const editor = useCreateBlockNote();
+  const theme = useAppTheme();
+  const canvasId = useId();
   const initializedFor = useRef<string | null>(null);
-  const [sentenceSplitCount, setSentenceSplitCount] = useState(0);
+  const loading = useRef(false);
+  const [ready, setReady] = useState(false);
+  const [focusedBlockId, setFocusedBlockId] = useState<string>();
+  const [incomingIds, setIncomingIds] = useState<string[]>([]);
+  const [error, setError] = useState<string>();
 
-  // Load initial Markdown into native Notion blocks whenever initialMarkdown changes.
   useEffect(() => {
     if (initializedFor.current === initialMarkdown) return;
-    initializedFor.current = initialMarkdown;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const blocks = await editor.tryParseMarkdownToBlocks(initialMarkdown || "");
-        if (!cancelled && blocks.length > 0) {
-          editor.replaceBlocks(editor.document, blocks);
-        }
-      } catch {
-        // Fallback: keep current document if markdown parsing throws
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [editor, initialMarkdown]);
-
-  async function emitMarkdown() {
+    loading.current = true;
     try {
-      const md = await editor.blocksToMarkdownLossy(editor.document);
-      onChangeMarkdown(md.trim());
+      const blocks = editor.tryParseMarkdownToBlocks(initialMarkdown);
+      const original =
+        originalMarkdown === undefined ? [] : editor.tryParseMarkdownToBlocks(originalMarkdown);
+      const before = original.map((block) => editor.blocksToMarkdownLossy([block]));
+      const after = blocks.map((block) => editor.blocksToMarkdownLossy([block]));
+      let start = 0;
+      let end = after.length;
+      let beforeEnd = before.length;
+      while (start < end && start < beforeEnd && before[start] === after[start]) start++;
+      while (end > start && beforeEnd > start && before[beforeEnd - 1] === after[end - 1]) {
+        end--;
+        beforeEnd--;
+      }
+      editor.transact((transaction) => {
+        transaction.setMeta("addToHistory", false);
+        editor.replaceBlocks(editor.document, blocks.length ? blocks : [{ type: "paragraph" }]);
+      });
+      setIncomingIds(
+        originalMarkdown === undefined ? [] : blocks.slice(start, end).map(({ id }) => id),
+      );
+      setFocusedBlockId(editor.document[0]?.id);
+      setReady(true);
+      onReadyChange?.(true);
+      setError(undefined);
+      initializedFor.current = initialMarkdown;
     } catch {
-      // ignore transient export error
+      setReady(false);
+      onReadyChange?.(false);
+      setError("This draft could not be loaded into the editor.");
+    } finally {
+      loading.current = false;
+    }
+  }, [editor, initialMarkdown, originalMarkdown, onReadyChange]);
+
+  function emitMarkdown() {
+    if (!loading.current && initializedFor.current === initialMarkdown) {
+      onChangeMarkdown(editor.blocksToMarkdownLossy(editor.document).trim());
     }
   }
 
-  /**
-   * Splits multi-sentence paragraph blocks into independent movable sentence blocks
-   * so the user can surgically drag any individual sentence anywhere in the canvas.
-   */
-  async function handleSplitIntoSentences() {
-    let splits = 0;
-    const nextBlocks: Array<{ type: "paragraph"; content: string }> = [];
-    const current = editor.document;
-    const replacements: Array<{ targetId: string; sentences: string[] }> = [];
+  const activeBlock = focusedBlockId ? editor.getBlock(focusedBlockId) : undefined;
+  const sentences = activeBlock?.type === "paragraph" ? splitParagraph(activeBlock.content) : [];
+  const canEdit = ready && !disabled;
 
-    for (const block of current) {
-      if (block.type !== "paragraph" || !Array.isArray(block.content)) continue;
-      const plain = block.content
-        .map((c) => (typeof c === "object" && c && "text" in c ? String(c.text) : ""))
-        .join("")
-        .trim();
-      if (!plain) continue;
-      // Split on sentence boundaries (. ! ?) followed by whitespace + capital/quote/number
-      const parts = plain
-        .split(/(?<=[.!?])\s+(?=[A-Z0-9"“‘(])/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (parts.length > 1) {
-        replacements.push({ targetId: block.id, sentences: parts });
-        splits += parts.length - 1;
-      }
-    }
-
-    if (replacements.length === 0) return;
-
-    for (const rep of replacements) {
-      nextBlocks.length = 0;
-      for (const s of rep.sentences) {
-        nextBlocks.push({ type: "paragraph", content: s });
-      }
-      editor.replaceBlocks([rep.targetId], nextBlocks);
-    }
-    setSentenceSplitCount((c) => c + splits);
-    await emitMarkdown();
+  function splitActiveParagraph() {
+    if (!activeBlock || sentences.length < 2) return;
+    const [first, ...rest] = sentences;
+    editor.transact(() => {
+      editor.updateBlock(activeBlock, { content: first });
+      editor.insertBlocks(
+        rest.map((content) => ({ type: "paragraph", content })),
+        activeBlock,
+        "after",
+      );
+    });
   }
 
+  function branchFromBlock() {
+    if (!activeBlock || !onBranch) return;
+    const quote =
+      editor.getSelectedText().trim() || editor.blocksToMarkdownLossy([activeBlock]).trim();
+    if (quote) onBranch(quote);
+  }
+
+  // BlockNote keeps block IDs stable during moves, so highlights follow the changed blocks.
+  const highlights = incomingIds
+    .map(
+      (id) =>
+        `[data-merge-canvas="${CSS.escape(canvasId)}"] .bn-block-outer[data-id="${CSS.escape(id)}"] > .bn-block > .bn-block-content`,
+    )
+    .join(",");
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Compact Notion Canvas Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/30 px-3 py-1.5">
-        <span className="text-[11px] text-muted-foreground">
-          Hover left edge for <strong className="text-foreground">⋮⋮ drag handle</strong> · Type{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">/</code> for headings, bullets &
-          blocks
-        </span>
-        <div className="flex items-center gap-1.5">
+    <div className="flex min-h-0 flex-col" data-merge-canvas={canvasId}>
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/40 px-2 py-1">
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          disabled={!canEdit || sentences.length < 2}
+          onClick={splitActiveParagraph}
+        >
+          <Scissors className="size-3.5" />
+          Split into sentences
+        </Button>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          aria-label="Move block up"
+          title="Move block up"
+          disabled={!canEdit || !activeBlock}
+          onClick={() => editor.moveBlocksUp(activeBlock)}
+        >
+          <ArrowUp className="size-3.5" />
+        </Button>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          aria-label="Move block down"
+          title="Move block down"
+          disabled={!canEdit || !activeBlock}
+          onClick={() => editor.moveBlocksDown(activeBlock)}
+        >
+          <ArrowDown className="size-3.5" />
+        </Button>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          aria-label="Undo edit"
+          title="Undo edit"
+          disabled={!canEdit}
+          onClick={() => editor.undo()}
+        >
+          <Undo2 className="size-3.5" />
+        </Button>
+        {onBranch ? (
           <Button
             type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => void handleSplitIntoSentences()}
-            className="h-6 gap-1 px-2 text-[11px]"
+            size="xs"
+            variant="ghost"
+            disabled={!canEdit || !activeBlock}
+            onClick={branchFromBlock}
           >
-            <Scissors className="size-3 text-success" />
-            <span>
-              Split into Sentences{sentenceSplitCount > 0 ? ` (+${sentenceSplitCount})` : ""}
-            </span>
+            <GitBranch className="size-3.5" />
+            Branch from block
           </Button>
+        ) : null}
+        {incomingIds.length ? (
           <Button
             type="button"
-            size="sm"
+            size="xs"
             variant="ghost"
             onClick={() => {
-              editor.undo();
-              void emitMarkdown();
+              const change = incomingIds
+                .map((id) =>
+                  editor.domElement?.querySelector(`.bn-block-outer[data-id="${CSS.escape(id)}"]`),
+                )
+                .find(Boolean);
+              change?.scrollIntoView({ block: "nearest" });
             }}
-            className="h-6 gap-1 px-2 text-[11px]"
           >
-            <Undo2 className="size-3" />
-            <span>Undo</span>
+            <LocateFixed className="size-3.5" />
+            Jump to changes
           </Button>
-        </div>
+        ) : null}
       </div>
-
-      {/* Scrollable Notion BlockNote Surface */}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="rk-scroll min-h-0 flex-1 overflow-y-auto bg-background/60 px-2 py-3 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-8 [&_.bn-editor]:text-sm"
-      >
-        <BlockNoteView
-          editor={editor}
-          theme="dark"
-          onChange={() => {
-            void emitMarkdown();
-          }}
-        />
-      </div>
+      {error ? (
+        <p role="alert" className="px-4 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {highlights ? (
+        <style>{`${highlights}{background:color-mix(in srgb, var(--success) 12%, transparent);}`}</style>
+      ) : null}
+      <BlockNoteView
+        editor={editor}
+        theme={theme}
+        editable={canEdit}
+        onChange={() => {
+          emitMarkdown();
+          setFocusedBlockId(editor.getTextCursorPosition().block.id);
+        }}
+        onSelectionChange={() => setFocusedBlockId(editor.getTextCursorPosition().block.id)}
+        className="min-w-0 bg-background py-3 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-10 [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-2 [&_.bn-block-content]:py-1"
+      />
     </div>
   );
 }

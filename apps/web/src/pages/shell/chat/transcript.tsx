@@ -65,7 +65,7 @@ import { TRANSCRIPT_CONTENT_PADDING } from "../../../lib/chat/transcript-layout"
 import { transcriptIsNearEnd, transcriptMovedDown } from "../../../lib/chat/transcript-scroll";
 import type { ArtifactTarget } from "../../../lib/pages/artifact-open";
 import { projectPageCards } from "../../../lib/pages/page-cards";
-import type { createSpaceRpc } from "../../../lib/query/rpc";
+import type { createSpaceRpc, RpcClient } from "../../../lib/query/rpc";
 import { useEventListener } from "../../../lib/use-event-listener";
 import type { ImportSetupTarget } from "../bots/import-setup-card";
 import { isEditableTarget } from "../shell-shortcuts";
@@ -138,7 +138,6 @@ export const Transcript = memo(function Transcript({
   onInstantBranch,
   onReorderPlacements,
   onRemovePlacement,
-  onSaveBlockOrder,
   onCommitMessageMarkdown,
   onOpenRearrangeCanvas,
   onDismissMergeReceipt,
@@ -213,14 +212,18 @@ export const Transcript = memo(function Transcript({
   onInstantBranch?: (input: {
     messageId: string;
     quoteText?: string;
-    utf16Start?: number;
-    utf16End?: number;
+    sourceMarkdown?: string;
   }) => void;
   onReorderPlacements?: (orderedIds: string[]) => Promise<void>;
   onRemovePlacement?: (placementId: string) => Promise<void>;
-  onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
-  onCommitMessageMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
-  onOpenRearrangeCanvas?: (messageId: string, markdown: string) => void;
+  onCommitMessageMarkdown?: (
+    messageId: string,
+    updatedMarkdown: string,
+    blockIndex: number,
+    originalMarkdown: string,
+    client?: RpcClient,
+  ) => Promise<void>;
+  onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
   onDismissMergeReceipt?: (receiptId: string) => void;
 }) {
   const { t } = useLingui();
@@ -764,13 +767,12 @@ export const Transcript = memo(function Transcript({
                           : undefined
                       }
                       reviewBlocksActive={reviewBlocksOpen}
-                      onSaveBlockOrder={onSaveBlockOrder}
                       onCommitMessageMarkdown={onCommitMessageMarkdown}
                       onOpenRearrangeCanvas={onOpenRearrangeCanvas}
                       onBranchBlockText={
                         onInstantBranch
-                          ? (msg, blockText) =>
-                              onInstantBranch({ messageId: msg.id, quoteText: blockText })
+                          ? (msg, quoteText, sourceMarkdown) =>
+                              onInstantBranch({ messageId: msg.id, quoteText, sourceMarkdown })
                           : undefined
                       }
                       showToolActivity={showToolActivity}
@@ -966,8 +968,8 @@ export const Transcript = memo(function Transcript({
                   onInstantBranch({
                     messageId: quoteDraft.message.id,
                     quoteText: quoteText || undefined,
-                    utf16Start: idx >= 0 ? idx : undefined,
-                    utf16End: idx >= 0 ? idx + quoteText.length : undefined,
+                    sourceMarkdown:
+                      idx >= 0 && fullText.indexOf(quoteText, idx + 1) < 0 ? fullText : undefined,
                   });
                 }
               : undefined

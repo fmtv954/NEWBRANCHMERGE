@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { ThreadMessage } from "@rakazo/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -13,7 +14,10 @@ const skills = vi.hoisted(() => ({
   save: vi.fn(async () => ({})),
   testRun: vi.fn(async () => ({ runId: "run" })),
 }));
-vi.mock("../../../lib/query/rpc", () => ({ rpc: { skills, artifacts: { get: vi.fn() } } }));
+vi.mock("../../../lib/query/rpc", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../lib/query/rpc")>()),
+  rpc: { skills, artifacts: { get: vi.fn() } },
+}));
 
 vi.mock("@lingui/core/macro", () => ({
   plural: (count: number, forms: { one: string; other: string }) =>
@@ -51,6 +55,17 @@ type PeerBot = ComponentProps<typeof MessageView>["peerBot"];
 const missingBot: PeerBot = () => undefined;
 const existingBot: PeerBot = () => ({ color: "orange" });
 
+it("offers inline canvas editing on a settled assistant reply", () => {
+  renderView("bot", [{ kind: "text", text: "A completed reply." }], {
+    onCommitMessageMarkdown: vi.fn(),
+  });
+  expect(
+    Array.from(container.querySelectorAll("button")).some(
+      (button) => button.textContent === "Edit blocks",
+    ),
+  ).toBe(true);
+});
+
 const planner = (status: "created" | "archived" | "deleted" = "created") => ({
   kind: "child_bot" as const,
   botId: "child",
@@ -73,31 +88,33 @@ function renderView(
   };
   act(() =>
     root.render(
-      <MessageView
-        rpc={rpc}
-        artifactTarget={{ botId: "parent" }}
-        canAnswer={false}
-        canDismiss={false}
-        message={message}
-        onAnswer={vi.fn()}
-        onOpenBot={vi.fn()}
-        onOpenPeerMessages={vi.fn()}
-        peerBot={existingBot}
-        onRefresh={vi.fn()}
-        onBotChanged={vi.fn()}
-        onAddRoutine={vi.fn()}
-        voiceReady={false}
-        speaking={false}
-        callHoldsSpeaker={false}
-        onSpeak={vi.fn()}
-        onOpenComputer={vi.fn()}
-        onReleaseComputer={vi.fn()}
-        showToolActivity={false}
-        onReply={vi.fn()}
-        onMarkUnread={vi.fn()}
-        onReact={vi.fn()}
-        {...props}
-      />,
+      <QueryClientProvider client={new QueryClient()}>
+        <MessageView
+          rpc={rpc}
+          artifactTarget={{ botId: "parent" }}
+          canAnswer={false}
+          canDismiss={false}
+          message={message}
+          onAnswer={vi.fn()}
+          onOpenBot={vi.fn()}
+          onOpenPeerMessages={vi.fn()}
+          peerBot={existingBot}
+          onRefresh={vi.fn()}
+          onBotChanged={vi.fn()}
+          onAddRoutine={vi.fn()}
+          voiceReady={false}
+          speaking={false}
+          callHoldsSpeaker={false}
+          onSpeak={vi.fn()}
+          onOpenComputer={vi.fn()}
+          onReleaseComputer={vi.fn()}
+          showToolActivity={false}
+          onReply={vi.fn()}
+          onMarkUnread={vi.fn()}
+          onReact={vi.fn()}
+          {...props}
+        />
+      </QueryClientProvider>,
     ),
   );
 }

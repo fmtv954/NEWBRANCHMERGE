@@ -5,6 +5,7 @@ import type {
   Branch,
   MergeReceipt,
   MergeReview,
+  MergeSourceBlock,
   Placement,
   Project,
   SpaceMemoryConfig,
@@ -26,6 +27,7 @@ import {
   isRunWorking,
   newClientId,
   otherAuthor,
+  sha256Hex,
   workingRoutineName,
 } from "@rakazo/core";
 import type { GroupAvatarMember } from "@rakazo/ui-web";
@@ -232,10 +234,15 @@ function SpaceShell() {
   const [sideBranchFocusQuote, setSideBranchFocusQuote] = useState<string | null>(null);
   const [showArchivedBranches, setShowArchivedBranches] = useState(false);
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
-  const [mergeModalInitialText, setMergeModalInitialText] = useState("");
+  const [mergeSelection, setMergeSelection] = useState<{
+    text: string;
+    blocks?: MergeSourceBlock[];
+  }>({ text: "" });
   const [standaloneCanvasMessage, setStandaloneCanvasMessage] = useState<{
     messageId: string;
+    blockIndex: number;
     markdown: string;
+    originalMarkdown?: string;
   } | null>(null);
   const [compareArenaOpen, setCompareArenaOpen] = useState(false);
   const [reviewBlocksOpen, setReviewBlocksOpen] = useState(false);
@@ -265,6 +272,29 @@ function SpaceShell() {
     return ensured;
   }
 
+  async function saveCanvasMarkdown(
+    messageId: string,
+    updatedMarkdown: string,
+    blockIndex: number,
+    originalMarkdown: string,
+    client: RpcClient = rpc,
+  ) {
+    const graph = await ensureGraphForActiveThread();
+    if (!graph) throw new Error("Could not find the Main conversation.");
+    await client.projects.updateMessageMarkdown({
+      projectId: graph.project.id,
+      branchId: graph.activeBranchId,
+      messageId,
+      updatedMarkdown,
+      blockIndex,
+      expectedTextDigest: sha256Hex(originalMarkdown),
+      sourceAction: "user_edit",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await refreshActiveThread();
+    toast.success("Main canvas updated");
+  }
+
   function autoBranchName(quoteText?: string): string {
     if (quoteText && quoteText.trim()) {
       const words = quoteText.trim().split(/\s+/).slice(0, 5).join(" ");
@@ -278,30 +308,29 @@ function SpaceShell() {
   async function handleInstantBranch(input: {
     messageId?: string;
     quoteText?: string;
-    utf16Start?: number;
-    utf16End?: number;
+    sourceMarkdown?: string;
   }) {
     const graph = await ensureGraphForActiveThread();
     if (!graph) return;
     const mainBranch = graph.branches.find((b) => b.isMain) ?? graph.branches[0];
     if (!mainBranch) return;
-    const hasRange =
-      typeof input.utf16Start === "number" &&
-      typeof input.utf16End === "number" &&
-      Boolean(input.quoteText);
+    const quote = input.quoteText?.trim();
+    const source = input.sourceMarkdown;
+    const first = quote && source ? source.indexOf(quote) : -1;
+    const unique = Boolean(quote && source && first >= 0 && source.indexOf(quote, first + 1) < 0);
     const created = await rpc.branches.create({
       projectId: graph.project.id,
       sourceBranchId: mainBranch.id,
       name: autoBranchName(input.quoteText),
       sourceMessageId: input.messageId,
-      selectionRange: hasRange
+      selectionRange: quote
         ? {
             startBlockId: "text_0",
             endBlockId: "text_0",
-            startUtf16: input.utf16Start!,
-            endUtf16: input.utf16End!,
-            quoteText: input.quoteText!,
-            textDigest: "",
+            startUtf16: unique ? first : 0,
+            endUtf16: unique ? first + quote.length : 0,
+            quoteText: quote,
+            textDigest: sha256Hex(source ?? quote),
           }
         : undefined,
       contextMode: "through_message",
@@ -1387,7 +1416,11 @@ function SpaceShell() {
                 activeMergeReview={activeMergeReview}
                 mergeReceipts={mergeReceipts}
                 reviewBlocksOpen={reviewBlocksOpen}
-                onInstantBranch={(input) => void handleInstantBranch(input)}
+                onInstantBranch={(input) => {
+                  void handleInstantBranch(input).catch((err) =>
+                    toast.error(err instanceof Error ? err.message : "Could not create branch"),
+                  );
+                }}
                 onReorderPlacements={async (orderedIds) => {
                   const mainB = projectBranches.find((b) => b.isMain) ?? projectBranches[0];
                   if (!mainB) return;
@@ -1401,35 +1434,9 @@ function SpaceShell() {
                   await rpc.placements.remove({ placementId });
                   setBranchPlacements((prev) => prev.filter((p) => p.id !== placementId));
                 }}
-                onSaveBlockOrder={async (messageId, orderedBlockIds) => {
-                  const graph = await ensureGraphForActiveThread();
-                  if (!graph) return;
-                  await rpc.projects.reorderMessageBlocks({
-                    projectId: graph.project.id,
-                    branchId: graph.activeBranchId,
-                    messageId,
-                    orderedBlockIds,
-                    idempotencyKey: crypto.randomUUID(),
-                  });
-                  await refreshActiveThread();
-                  toast.success("Block order committed");
-                }}
-                onCommitMessageMarkdown={async (messageId, updatedMarkdown) => {
-                  const graph = await ensureGraphForActiveThread();
-                  if (!graph) return;
-                  await rpc.projects.updateMessageMarkdown({
-                    projectId: graph.project.id,
-                    branchId: graph.activeBranchId,
-                    messageId,
-                    updatedMarkdown,
-                    sourceAction: "user_edit",
-                    idempotencyKey: crypto.randomUUID(),
-                  });
-                  await refreshActiveThread();
-                  toast.success("Main canvas updated");
-                }}
-                onOpenRearrangeCanvas={(messageId, markdown) => {
-                  setStandaloneCanvasMessage({ messageId, markdown });
+                onCommitMessageMarkdown={saveCanvasMarkdown}
+                onOpenRearrangeCanvas={(messageId, markdown, blockIndex) => {
+                  setStandaloneCanvasMessage({ messageId, markdown, blockIndex });
                   setMergeModalOpen(true);
                 }}
                 onDismissMergeReceipt={(receiptId) => {
@@ -1622,8 +1629,8 @@ function SpaceShell() {
           {/* Right Split-Pane Side Branch (full height, zero overlap with Main Header or Composer) */}
           {sideBranch && activeProject && activeSnapshot?.threadId ? (
             <SideBranchPane
+              key={sideBranch.id}
               rpc={rpc}
-              projectId={activeProject.id}
               branch={sideBranch}
               activeBot={active}
               initialFocusQuote={sideBranchFocusQuote}
@@ -1634,9 +1641,9 @@ function SpaceShell() {
                   prev.map((b) => (b.id === sideBranch.id ? { ...b, name: nextName } : b)),
                 );
               }}
-              onInjectIntoMain={async ({ mode, text, sourceBranchId }) => {
-                const mainBranch = projectBranches.find((b) => b.isMain) ?? projectBranches[0];
-                if (!mainBranch) return;
+              onInjectIntoMain={async ({ mode, text, sourceBranchId, selectedBlocks }) => {
+                const mainBranch = projectBranches.find((b) => b.isMain);
+                if (!mainBranch) throw new Error("Could not find Main.");
                 const strategy =
                   mode === "replace_spot"
                     ? "replace"
@@ -1649,6 +1656,7 @@ function SpaceShell() {
                   targetBranchId: mainBranch.id,
                   strategy,
                   selectedText: text,
+                  selectedBlocks,
                   archiveAfterMerge: false,
                   previewOnly: false,
                 });
@@ -1658,14 +1666,14 @@ function SpaceShell() {
                 await refreshActiveThread();
                 toast.success(
                   strategy === "replace"
-                    ? "Replaced highlighted spot uniformly in Main"
+                    ? "Replaced highlighted text in Main"
                     : strategy === "append"
-                      ? "Appended uniformly into Main (hover any segment to drag/reorder)"
-                      : "Inserted uniformly at branch spot in Main",
+                      ? "Appended to Main"
+                      : "Inserted into Main",
                 );
               }}
-              onOpenMergeReview={(latestText) => {
-                setMergeModalInitialText(latestText ?? "");
+              onOpenMergeReview={(text, blocks) => {
+                setMergeSelection({ text: text ?? "", blocks });
                 setMergeModalOpen(true);
               }}
               onClose={() => setSideBranch(null)}
@@ -1674,33 +1682,21 @@ function SpaceShell() {
         </div>
       </main>
 
-      {(sideBranch || standaloneCanvasMessage) && activeProject ? (
+      {mergeModalOpen && (sideBranch || standaloneCanvasMessage) && activeProject ? (
         <MergeBranchModal
-          open={mergeModalOpen}
-          onOpenChange={(nextOpen) => {
-            setMergeModalOpen(nextOpen);
-            if (!nextOpen) setStandaloneCanvasMessage(null);
+          key={standaloneCanvasMessage?.messageId ?? sideBranch?.id}
+          onClose={() => {
+            setMergeModalOpen(false);
+            setStandaloneCanvasMessage(null);
           }}
           rpc={rpc}
           projectId={activeProject.id}
           sourceBranch={sideBranch}
-          targetBranch={projectBranches.find((b) => b.isMain) ?? projectBranches[0] ?? sideBranch}
-          initialSelectedText={mergeModalInitialText}
+          targetBranch={projectBranches.find((b) => b.isMain)}
+          initialSelectedText={mergeSelection.text}
+          selectedBlocks={mergeSelection.blocks}
           standaloneMessage={standaloneCanvasMessage}
-          onSavedStandalone={async (messageId, updatedMarkdown) => {
-            const graph = await ensureGraphForActiveThread();
-            if (!graph) return;
-            await rpc.projects.updateMessageMarkdown({
-              projectId: graph.project.id,
-              branchId: graph.activeBranchId,
-              messageId,
-              updatedMarkdown,
-              sourceAction: "user_edit",
-              idempotencyKey: crypto.randomUUID(),
-            });
-            await refreshActiveThread();
-            toast.success("Main canvas updated");
-          }}
+          onSavedStandalone={saveCanvasMarkdown}
           onMerged={async ({ receipt, archivedBranchId }) => {
             if (receipt) setMergeReceipts([receipt]);
             if (archivedBranchId) {
@@ -1711,7 +1707,7 @@ function SpaceShell() {
               if (refreshed) setProjectBranches(refreshed);
             }
             await refreshActiveThread();
-            toast.success("Merged uniformly into Main");
+            toast.success("Merged into Main");
           }}
         />
       ) : null}
@@ -1762,9 +1758,14 @@ function SpaceShell() {
             .reverse()
             .find((m) => m.role === "bot");
           if (latestAssistant) {
+            const blockIndex = latestAssistant.blocks.findIndex((block) => block.kind === "text");
+            const block = latestAssistant.blocks[blockIndex];
+            if (block?.kind !== "text") return;
             setStandaloneCanvasMessage({
               messageId: latestAssistant.id,
+              blockIndex,
               markdown: combinedMarkdown,
+              originalMarkdown: block.text,
             });
             setMergeModalOpen(true);
           } else {

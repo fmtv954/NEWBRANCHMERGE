@@ -6,15 +6,17 @@ import type {
   CompareGroup,
   ContextPreview,
   MergeItemResolutionChoice,
+  MergePreviewBase,
   MergeReceipt,
   MergeReview,
+  MergeSourceBlock,
   Placement,
   Project,
   RunManifest,
   SelectionBlockRange,
   ThinkingLevel,
 } from "@rakazo/contracts";
-import { findCatalogModel } from "@rakazo/contracts";
+import { findCatalogModel, MergePreviewBaseSchema, SelectionBlockRangeSchema } from "@rakazo/contracts";
 import type { ItemMergeBaseline, MergeableEntity } from "@rakazo/core";
 import {
   applySurgicalSelectionPatch,
@@ -27,6 +29,18 @@ import {
   sha256Hex,
 } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
+import * as z from "zod";
+import { mergeAnchor, placeMergeText } from "./merge-placement.js";
+
+const StoredStrategyMergeSchema = z.object({
+  beforeText: z.string(),
+  afterText: z.string(),
+  beforeContext: z.string().optional(),
+  afterContext: z.string().optional(),
+  previewBase: MergePreviewBaseSchema,
+  archivedBranchId: z.string().nullable(),
+});
+const MergeMessageBlocksSchema = z.array(z.looseObject({ kind: z.string() }));
 
 function toIso(d: Date): string {
   return d.toISOString();
@@ -622,10 +636,17 @@ export function createProjectsService(prisma: PrismaClient) {
         branchId: string;
         messageId: string;
         updatedMarkdown: string;
+        blockIndex?: number;
+        expectedTextDigest?: string;
         sourceAction?: "user_edit" | "merge_apply";
         idempotencyKey: string;
       },
-    ): Promise<{ revisionId: string; version: number; messageId: string; updatedMarkdown: string }> {
+    ): Promise<{
+      revisionId: string;
+      version: number;
+      messageId: string;
+      updatedMarkdown: string;
+    }> {
       await requireProjectAccess(prisma, actor, input.projectId, "editor");
       const message = await prisma.message.findFirst({
         where: { id: input.messageId, thread: { spaceId: actor.spaceId } },
@@ -637,8 +658,21 @@ export function createProjectsService(prisma: PrismaClient) {
       const blocks = Array.isArray(message.blocks)
         ? (message.blocks as Array<Record<string, unknown>>)
         : [];
-      const textIdx = blocks.findIndex((b) => b.kind === "text" && typeof b.text === "string");
-      const originalMarkdown = textIdx >= 0 ? String(blocks[textIdx]!.text) : "";
+      const textIdx =
+        input.blockIndex ??
+        blocks.findIndex((b) => b.kind === "text" && typeof b.text === "string");
+      const block = blocks[textIdx];
+      const originalMarkdown =
+        block?.kind === "text" && typeof block.text === "string" ? block.text : "";
+      if (
+        (input.blockIndex !== undefined && block?.kind !== "text") ||
+        (input.expectedTextDigest !== undefined &&
+          sha256Hex(originalMarkdown) !== input.expectedTextDigest)
+      ) {
+        throw new ORPCError("CONFLICT", {
+          message: "Main changed. Reopen the canvas to edit the latest version.",
+        });
+      }
       const nextBlocks = [...blocks];
       if (textIdx >= 0) {
         nextBlocks[textIdx] = { ...nextBlocks[textIdx], text: input.updatedMarkdown };
@@ -647,6 +681,19 @@ export function createProjectsService(prisma: PrismaClient) {
       }
 
       return prisma.$transaction(async (tx) => {
+        const updated = await tx.message.updateMany({
+          where: {
+            id: message.id,
+            activeRevisionId: message.activeRevisionId,
+            blocks: { equals: blocks as object },
+          },
+          data: { blocks: nextBlocks as object },
+        });
+        if (!updated.count) {
+          throw new ORPCError("CONFLICT", {
+            message: "Main changed. Reopen the canvas to edit the latest version.",
+          });
+        }
         const latestMsgRev = await tx.messageRevision.findFirst({
           where: { messageId: message.id },
           orderBy: { version: "desc" },
@@ -677,7 +724,7 @@ export function createProjectsService(prisma: PrismaClient) {
         });
         await tx.message.update({
           where: { id: message.id },
-          data: { blocks: nextBlocks as object, activeRevisionId: msgRev.id },
+          data: { activeRevisionId: msgRev.id },
         });
         return {
           revisionId: msgRev.id,
@@ -2060,6 +2107,9 @@ export function createProjectsService(prisma: PrismaClient) {
         targetBranchId: string;
         strategy: "ai_assisted" | "replace" | "append" | "insert";
         selectedText: string;
+        selectedBlocks?: MergeSourceBlock[];
+        previewBase?: MergePreviewBase;
+        idempotencyKey?: string;
         finalAfterText?: string;
         instructions?: string;
         archiveAfterMerge: boolean;
@@ -2074,44 +2124,198 @@ export function createProjectsService(prisma: PrismaClient) {
         }),
         prisma.branch.findUnique({ where: { id: input.targetBranchId } }),
       ]);
-      if (!sourceBranch || !targetBranch) {
-        throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
+      if (
+        !sourceBranch ||
+        !targetBranch ||
+        sourceBranch.projectId !== input.projectId ||
+        targetBranch.projectId !== input.projectId ||
+        sourceBranch.isMain ||
+        !targetBranch.isMain ||
+        targetBranch.archivedAt
+      ) {
+        throw new ORPCError("NOT_FOUND", { message: "Source branch or Main not found" });
       }
 
-      const focusQuote =
-        (sourceBranch.forkOrigin?.selectionRangeJson as SelectionBlockRange | null)?.quoteText ??
-        "";
-      const targetMsgId = sourceBranch.forkOrigin?.sourceMessageId ?? null;
-      const targetMsg = targetMsgId
-        ? await prisma.message.findUnique({
-            where: { id: targetMsgId },
-            select: { id: true, blocks: true, activeRevisionId: true },
-          })
-        : await prisma.message.findFirst({
-            where: { threadId: targetBranch.threadId, role: "assistant" },
-            orderBy: { seq: "desc" },
-            select: { id: true, blocks: true, activeRevisionId: true },
+      const idempotencyKey = input.idempotencyKey ?? `strategy_${crypto.randomUUID()}`;
+      const describeReceipt = (receipt: {
+        id: string;
+        mergeReviewId: string | null;
+        sourceHeadRevisionId: string | null;
+        baseRevisionId: string | null;
+        targetBeforeRevisionId: string | null;
+        targetAfterRevisionId: string;
+        undoneByReceiptId: string | null;
+        createdAt: Date;
+      }): MergeReceipt => ({
+        id: receipt.id,
+        mergeReviewId: receipt.mergeReviewId,
+        sourceHeadRevisionId: receipt.sourceHeadRevisionId,
+        baseRevisionId: receipt.baseRevisionId,
+        targetBeforeRevisionId: receipt.targetBeforeRevisionId,
+        targetAfterRevisionId: receipt.targetAfterRevisionId,
+        undoneByReceiptId: receipt.undoneByReceiptId,
+        projectId: input.projectId,
+        idempotencyKey,
+        sourceBranchId: sourceBranch.id,
+        targetBranchId: targetBranch.id,
+        acceptedCount: 1,
+        deferredCount: 0,
+        affectedDependencies: [],
+        actorUserId: actor.userId,
+        createdAt: toIso(receipt.createdAt),
+      });
+
+      const readAppliedMerge = async () => {
+        if (input.previewOnly || !input.idempotencyKey) return null;
+        const receipt = await prisma.mergeReceipt.findFirst({
+          where: {
+            idempotencyKey,
+            projectId: input.projectId,
+            sourceBranchId: sourceBranch.id,
+            targetBranchId: targetBranch.id,
+            actorUserId: actor.userId,
+          },
+        });
+        if (!receipt) return null;
+        const revision = await prisma.projectRevision.findUnique({
+          where: { id: receipt.targetAfterRevisionId },
+          select: { stateDeltaJson: true },
+        });
+        const delta = StoredStrategyMergeSchema.safeParse(revision?.stateDeltaJson).data;
+        if (!delta) return null;
+        return {
+          beforeText: delta.beforeText,
+          afterText: delta.afterText,
+          beforeContext: delta.beforeContext,
+          afterContext: delta.afterContext,
+          targetMessageId: delta.previewBase.messageId,
+          previewBase: delta.previewBase,
+          applied: true,
+          receipt: describeReceipt(receipt),
+          archivedBranchId: delta.archivedBranchId,
+          placement: null,
+        };
+      };
+
+      const existing = await readAppliedMerge();
+      if (existing) return existing;
+      if (sourceBranch.archivedAt) {
+        throw new ORPCError("CONFLICT", { message: "This branch has been archived." });
+      }
+
+      const savedSelection = sourceBranch.forkOrigin?.selectionRangeJson;
+      const selection = SelectionBlockRangeSchema.safeParse(savedSelection).data;
+      const originMessageId = sourceBranch.forkOrigin?.sourceMessageId;
+      const targetMsg = await prisma.message.findFirst({
+        where: {
+          threadId: targetBranch.threadId,
+          ...(input.previewBase || originMessageId
+            ? { id: input.previewBase?.messageId ?? originMessageId }
+            : { role: "assistant" }),
+        },
+        orderBy: { seq: "desc" },
+        select: { id: true, blocks: true, activeRevisionId: true },
+      });
+      if (!targetMsg || (originMessageId && targetMsg.id !== originMessageId)) {
+        throw new ORPCError("CONFLICT", { message: "The destination message in Main is missing." });
+      }
+
+      const blocks = MergeMessageBlocksSchema.safeParse(targetMsg.blocks).data;
+      if (!blocks) {
+        throw new ORPCError("CONFLICT", { message: "The destination message could not be read." });
+      }
+      const textBlocks = blocks.flatMap((block, index) =>
+        block.kind === "text" && typeof block.text === "string"
+          ? [{ index, text: block.text }]
+          : [],
+      );
+      const matchingBlocks = selection?.quoteText
+        ? textBlocks.filter((block) => mergeAnchor(block.text, selection) !== null)
+        : [];
+      const originalBlocks = matchingBlocks.filter(
+        (block) => sha256Hex(block.text) === selection?.textDigest,
+      );
+      const anchored = input.strategy === "insert" || input.strategy === "replace";
+      const matchingBlock =
+        originalBlocks.length === 1
+          ? originalBlocks[0]
+          : matchingBlocks.length === 1
+            ? matchingBlocks[0]
+            : undefined;
+      const targetBlock = input.previewBase
+        ? textBlocks.find((block) => block.index === input.previewBase?.blockIndex)
+        : matchingBlock ?? textBlocks.at(-1);
+      if (!targetBlock) {
+        throw new ORPCError("CONFLICT", {
+          message: "The destination text block in Main is missing.",
+        });
+      }
+
+      const beforeText = targetBlock.text;
+      const beforeContext = textBlocks
+        .filter(({ index }) => index < targetBlock.index)
+        .map(({ text }) => text)
+        .join("\n\n");
+      const afterContext = textBlocks
+        .filter(({ index }) => index > targetBlock.index)
+        .map(({ text }) => text)
+        .join("\n\n");
+      const previewBase = {
+        messageId: targetMsg.id,
+        revisionId: targetMsg.activeRevisionId,
+        blockIndex: targetBlock.index,
+        textDigest: sha256Hex(beforeText),
+      };
+      if (
+        input.previewBase &&
+        (input.previewBase.revisionId !== previewBase.revisionId ||
+          input.previewBase.textDigest !== previewBase.textDigest)
+      ) {
+        throw new ORPCError("CONFLICT", {
+          message: "Main changed. Reopen the preview to place your blocks on the latest version.",
+        });
+      }
+      if (
+        input.finalAfterText !== undefined &&
+        (input.previewOnly || !input.previewBase || !input.finalAfterText.trim())
+      ) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: "Generate a preview and keep some text in the draft before saving.",
+        });
+      }
+
+      const sourceBlocks = input.selectedBlocks;
+      const incoming = (
+        sourceBlocks?.map((block) => block.markdown.trim()).join("\n\n") ?? input.selectedText
+      ).trim();
+      if (!incoming || incoming.length > 40_000) {
+        throw new ORPCError("BAD_REQUEST", { message: "Select up to 40,000 characters to merge." });
+      }
+      if (sourceBlocks) {
+        const messageIds = [...new Set(sourceBlocks.map((block) => block.messageId))];
+        const count = await prisma.message.count({
+          where: { id: { in: messageIds }, threadId: sourceBranch.threadId, role: "assistant" },
+        });
+        if (count !== messageIds.length) {
+          throw new ORPCError("CONFLICT", {
+            message: "Some selected replies no longer belong to this side branch.",
           });
-
-      const beforeText = targetMsg ? extractTextFromBlocks(targetMsg.blocks) : "";
-      const incoming = input.selectedText.trim();
-      let afterText = beforeText;
-
-      if (input.strategy === "replace") {
-        if (focusQuote && beforeText.includes(focusQuote)) {
-          afterText = beforeText.replace(focusQuote, incoming);
-        } else {
-          afterText = incoming;
         }
-      } else if (input.strategy === "insert") {
-        if (focusQuote && beforeText.includes(focusQuote)) {
-          afterText = beforeText.replace(focusQuote, `${focusQuote}\n\n${incoming}`);
-        } else {
-          afterText = beforeText ? `${beforeText}\n\n${incoming}` : incoming;
+      }
+
+      let afterText: string;
+      if (input.finalAfterText !== undefined) {
+        afterText = input.finalAfterText.trim();
+      } else if (input.strategy !== "ai_assisted") {
+        if (anchored && savedSelection && !matchingBlock) {
+          throw new ORPCError("CONFLICT", {
+            message:
+              "The branch point is missing or ambiguous. Choose Place manually to set the position in the draft.",
+          });
         }
-      } else if (input.strategy === "append") {
-        afterText = beforeText ? `${beforeText}\n\n${incoming}` : incoming;
-      } else if (input.strategy === "ai_assisted") {
+        afterText = placeMergeText(beforeText, incoming, input.strategy, selection);
+      } else {
+        const focusQuote = selection?.quoteText;
         const synthesized = await callBranchCompletion({
           provider: "openai",
           modelId: "gpt-4o-mini",
@@ -2127,14 +2331,18 @@ export function createProjectsService(prisma: PrismaClient) {
             },
           ],
         });
-        afterText = synthesized.text.trim() || (beforeText ? `${beforeText}\n\n${incoming}` : incoming);
+        afterText =
+          synthesized.text.trim() || (beforeText ? `${beforeText}\n\n${incoming}` : incoming);
       }
 
       if (input.previewOnly) {
         return {
           beforeText,
           afterText,
-          targetMessageId: targetMsg?.id ?? null,
+          beforeContext,
+          afterContext,
+          targetMessageId: targetMsg.id,
+          previewBase,
           applied: false,
           receipt: null,
           archivedBranchId: null,
@@ -2142,22 +2350,21 @@ export function createProjectsService(prisma: PrismaClient) {
         };
       }
 
-      // If the user manually dragged segments to an exact spot in Merge Preview, honor finalAfterText!
-      const committedText = input.finalAfterText?.trim() ? input.finalAfterText.trim() : afterText;
-
-      // Apply mutation uniformly into Main's actual Message.blocks + MessageRevision
-      // (zero separate green Kept box; automatically part of Main's live context window!).
-      const result = await prisma.$transaction(async (tx) => {
-        if (targetMsg) {
-          const blocks = Array.isArray(targetMsg.blocks)
-            ? (targetMsg.blocks as Array<Record<string, unknown>>)
-            : [];
-          const textIdx = blocks.findIndex((b) => b.kind === "text" && typeof b.text === "string");
+      const archivedBranchId = input.archiveAfterMerge ? sourceBranch.id : null;
+      try {
+        const result = await prisma.$transaction(async (tx) => {
           const nextBlocks = [...blocks];
-          if (textIdx >= 0) {
-            nextBlocks[textIdx] = { ...nextBlocks[textIdx], text: committedText };
-          } else {
-            nextBlocks.unshift({ kind: "text", text: committedText });
+          nextBlocks[targetBlock.index] = { ...nextBlocks[targetBlock.index], text: afterText };
+          const updated = await tx.message.updateMany({
+            where: {
+              id: targetMsg.id,
+              activeRevisionId: previewBase.revisionId,
+              blocks: { equals: blocks as object },
+            },
+            data: { blocks: nextBlocks as object },
+          });
+          if (!updated.count) {
+            throw new ORPCError("CONFLICT", { message: "Main changed. Reopen the merge preview." });
           }
           const latestMsgRev = await tx.messageRevision.findFirst({
             where: { messageId: targetMsg.id },
@@ -2181,103 +2388,98 @@ export function createProjectsService(prisma: PrismaClient) {
             data: {
               messageId: targetMsg.id,
               version: nextVersion,
-              canonicalText: committedText,
+              canonicalText: afterText,
               blocksJson: nextBlocks as object,
               sourceAction: "merge_apply",
             },
           });
           await tx.message.update({
             where: { id: targetMsg.id },
-            data: { blocks: nextBlocks as object, activeRevisionId: msgRev.id },
+            data: { activeRevisionId: msgRev.id },
           });
-        }
 
-        const latestRev = await tx.projectRevision.findFirst({
-          where: { branchId: targetBranch.id },
-          orderBy: { revisionNumber: "desc" },
-          select: { id: true, revisionNumber: true },
-        });
-        const rev = await tx.projectRevision.create({
-          data: {
-            projectId: input.projectId,
-            branchId: targetBranch.id,
-            parentRevisionId: latestRev?.id ?? null,
-            revisionNumber: (latestRev?.revisionNumber ?? 0) + 1,
-            authorUserId: actor.userId,
-            eventType: "merge_apply",
-            stateDeltaJson: {
-              strategy: input.strategy,
-              targetMessageId: targetMsg?.id ?? null,
-              beforeText,
-              afterText,
-            },
-          },
-        });
-        await tx.branch.update({
-          where: { id: targetBranch.id },
-          data: { headRevisionId: rev.id },
-        });
-
-        let archivedBranchId: string | null = null;
-        if (input.archiveAfterMerge && !sourceBranch.isMain) {
-          await tx.branch.update({
-            where: { id: sourceBranch.id },
-            data: { archivedAt: new Date() },
+          const latestRev = await tx.projectRevision.findFirst({
+            where: { branchId: targetBranch.id },
+            orderBy: { revisionNumber: "desc" },
+            select: { id: true, revisionNumber: true },
           });
-          archivedBranchId = sourceBranch.id;
-        }
-
-        const receipt = await tx.mergeReceipt.create({
-          data: {
-            projectId: input.projectId,
-            idempotencyKey: `strategy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            sourceBranchId: sourceBranch.id,
-            targetBranchId: targetBranch.id,
-            baseRevisionId: latestRev?.id ?? null,
-            targetBeforeRevisionId: latestRev?.id ?? null,
-            targetAfterRevisionId: rev.id,
-            itemResolutionsJson: [
-              {
-                itemId: targetMsg?.id ?? sourceBranch.id,
-                choice: "use_branch",
-                resolvedText: afterText,
+          const rev = await tx.projectRevision.create({
+            data: {
+              projectId: input.projectId,
+              branchId: targetBranch.id,
+              parentRevisionId: latestRev?.id ?? null,
+              revisionNumber: (latestRev?.revisionNumber ?? 0) + 1,
+              authorUserId: actor.userId,
+              eventType: "merge_apply",
+              stateDeltaJson: {
+                strategy: input.strategy,
+                targetMessageId: targetMsg.id,
                 beforeText,
+                afterText,
+                beforeContext,
+                afterContext,
+                previewBase,
+                archivedBranchId,
               },
-            ],
-            affectedDependenciesJson: [],
-            actorUserId: actor.userId,
-          },
+            },
+          });
+          const branchUpdated = await tx.branch.updateMany({
+            where: { id: targetBranch.id, headRevisionId: targetBranch.headRevisionId },
+            data: { headRevisionId: rev.id },
+          });
+          if (!branchUpdated.count) {
+            throw new ORPCError("CONFLICT", { message: "Main changed. Reopen the merge preview." });
+          }
+
+          if (archivedBranchId) {
+            await tx.branch.update({
+              where: { id: archivedBranchId },
+              data: { archivedAt: new Date() },
+            });
+          }
+
+          return tx.mergeReceipt.create({
+            data: {
+              projectId: input.projectId,
+              idempotencyKey,
+              sourceBranchId: sourceBranch.id,
+              targetBranchId: targetBranch.id,
+              sourceHeadRevisionId: sourceBranch.headRevisionId,
+              baseRevisionId: latestRev?.id ?? null,
+              targetBeforeRevisionId: latestRev?.id ?? null,
+              targetAfterRevisionId: rev.id,
+              itemResolutionsJson: [
+                {
+                  itemId: targetMsg.id,
+                  choice: "use_branch",
+                  resolvedText: afterText,
+                  beforeText,
+                  ...(sourceBlocks ? { sourceBlocks } : {}),
+                },
+              ],
+              affectedDependenciesJson: [],
+              actorUserId: actor.userId,
+            },
+          });
         });
 
-        return { receipt, archivedBranchId };
-      });
-
-      return {
-        beforeText,
-        afterText,
-        targetMessageId: targetMsg?.id ?? null,
-        applied: true,
-        receipt: {
-          id: result.receipt.id,
-          projectId: result.receipt.projectId,
-          mergeReviewId: result.receipt.mergeReviewId,
-          idempotencyKey: result.receipt.idempotencyKey,
-          sourceBranchId: result.receipt.sourceBranchId,
-          targetBranchId: result.receipt.targetBranchId,
-          sourceHeadRevisionId: result.receipt.sourceHeadRevisionId,
-          baseRevisionId: result.receipt.baseRevisionId,
-          targetBeforeRevisionId: result.receipt.targetBeforeRevisionId,
-          targetAfterRevisionId: result.receipt.targetAfterRevisionId,
-          acceptedCount: 1,
-          deferredCount: 0,
-          affectedDependencies: [],
-          undoneByReceiptId: result.receipt.undoneByReceiptId,
-          actorUserId: result.receipt.actorUserId,
-          createdAt: toIso(result.receipt.createdAt),
-        },
-        archivedBranchId: result.archivedBranchId,
-        placement: null,
-      };
+        return {
+          beforeText,
+          afterText,
+          beforeContext,
+          afterContext,
+          targetMessageId: targetMsg.id,
+          previewBase,
+          applied: true,
+          receipt: describeReceipt(result),
+          archivedBranchId,
+          placement: null,
+        };
+      } catch (error) {
+        const applied = await readAppliedMerge();
+        if (applied) return applied;
+        throw error;
+      }
     },
   };
 }

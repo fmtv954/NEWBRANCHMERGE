@@ -44,6 +44,21 @@ export const SelectionBlockRangeSchema = z.object({
 });
 export type SelectionBlockRange = z.infer<typeof SelectionBlockRangeSchema>;
 
+export const MergeSourceBlockSchema = z.object({
+  messageId: Id,
+  blockId: z.string().min(1).max(300),
+  markdown: z.string().min(1).max(40_000),
+});
+export type MergeSourceBlock = z.infer<typeof MergeSourceBlockSchema>;
+
+export const MergePreviewBaseSchema = z.object({
+  messageId: Id,
+  revisionId: Id.nullable(),
+  blockIndex: z.number().int().nonnegative(),
+  textDigest: z.string().length(64),
+});
+export type MergePreviewBase = z.infer<typeof MergePreviewBaseSchema>;
+
 export const PlacementAnchorKindSchema = z.enum([
   "after_message",
   "before_message",

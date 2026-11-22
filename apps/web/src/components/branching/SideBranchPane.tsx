@@ -1,14 +1,17 @@
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
-import {
-  type Bot,
-  type Branch,
-  type BranchContextMode,
-  CLONE_SYSTEM_PERSONAS,
-  type ModelPersona,
-} from "@rakazo/contracts";
+import type { Bot, Branch, BranchContextMode, MergeSourceBlock, ModelPersona } from "@rakazo/contracts";
+import { CLONE_SYSTEM_PERSONAS } from "@rakazo/contracts";
 import { buildSmartSegments } from "@rakazo/core";
-import { Badge, Button, Card, Checkbox, Popover, PopoverContent, PopoverTrigger } from "@rakazo/ui-web";
 import {
+  Button,
+  Card,
+  Checkbox,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@rakazo/ui-web";
+import {
+  ArrowDown,
   ArrowDownToLine,
   ArrowUp,
   BookmarkPlus,
@@ -17,6 +20,7 @@ import {
   GitMerge,
   Loader2,
   Pencil,
+  Scissors,
   SlidersHorizontal,
   Sparkles,
   X,
@@ -26,6 +30,7 @@ import { useUnifiedModels } from "../../lib/models/use-unified-models";
 import type { createSpaceRpc } from "../../lib/query/rpc";
 import { PersonaPicker } from "./PersonaPicker";
 import { SideBranchModelPicker } from "./SideBranchModelPicker";
+import { hasMultipleSentences, splitMarkdownParagraph } from "./sentence-blocks";
 
 export interface SideBranchMessage {
   id: string;
@@ -33,6 +38,10 @@ export interface SideBranchMessage {
   text: string;
   modelLabel?: string;
   createdAt?: string;
+}
+
+function focusRenameInput(input: HTMLInputElement | null) {
+  input?.focus();
 }
 
 /**
@@ -46,7 +55,6 @@ export interface SideBranchMessage {
  */
 export function SideBranchPane({
   rpc,
-  projectId,
   branch,
   activeBot,
   initialFocusQuote,
@@ -57,7 +65,6 @@ export function SideBranchPane({
   onClose,
 }: {
   rpc: ReturnType<typeof createSpaceRpc>;
-  projectId: string;
   branch: Branch;
   activeBot?: Bot;
   initialFocusQuote?: string | null;
@@ -66,9 +73,10 @@ export function SideBranchPane({
   onInjectIntoMain: (input: {
     mode: "insert_spot" | "replace_spot" | "drop_block";
     text: string;
+    selectedBlocks?: MergeSourceBlock[];
     sourceBranchId: string;
   }) => Promise<void>;
-  onOpenMergeReview: (selectedText?: string) => void;
+  onOpenMergeReview: (selectedText?: string, selectedBlocks?: MergeSourceBlock[]) => void;
   onClose: () => void;
 }) {
   const { defaultMainModelKey } = useUnifiedModels(activeBot);
@@ -96,19 +104,70 @@ export function SideBranchPane({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [injectingKey, setInjectingKey] = useState<string | null>(null);
-  const [selectedSegments, setSelectedSegments] = useState<Record<string, string>>({});
+  const [selectedSegments, setSelectedSegments] = useState<MergeSourceBlock[]>([]);
+  const [splitBlocks, setSplitBlocks] = useState<Record<string, MergeSourceBlock[]>>({});
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
 
-  const selectedSegmentList = Object.values(selectedSegments);
-  function toggleSegmentSelection(segKey: string, markdown: string) {
-    setSelectedSegments((prev) => {
-      const next = { ...prev };
-      if (next[segKey]) delete next[segKey];
-      else next[segKey] = markdown;
+  function toggleSegmentSelection(block: MergeSourceBlock) {
+    setSelectedSegments((current) =>
+      current.some((item) => item.blockId === block.blockId)
+        ? current.filter((item) => item.blockId !== block.blockId)
+        : [...current, block],
+    );
+  }
+
+  function splitBlock(block: MergeSourceBlock) {
+    try {
+      const parts = splitMarkdownParagraph(block.markdown);
+      if (!parts.length) return;
+      const replacements = parts.map((markdown, index) => ({
+        ...block,
+        blockId: `${block.blockId}:${index}`,
+        markdown,
+      }));
+      setSplitBlocks((current) => ({ ...current, [block.blockId]: replacements }));
+      setSelectedSegments((current) =>
+        current.flatMap((item) => (item.blockId === block.blockId ? replacements : [item])),
+      );
+    } catch {
+      setError("This block could not be split.");
+    }
+  }
+
+  function moveSelection(index: number, direction: -1 | 1) {
+    setSelectedSegments((current) => {
+      const destination = index + direction;
+      if (destination < 0 || destination >= current.length) return current;
+      const next = [...current];
+      [next[index], next[destination]] = [next[destination]!, next[index]!];
       return next;
     });
+  }
+
+  const selectedText = selectedSegments.map((block) => block.markdown).join("\n\n");
+
+  async function inject(
+    mode: "insert_spot" | "replace_spot" | "drop_block",
+    message: SideBranchMessage,
+  ) {
+    if (injectingKey) return;
+    setInjectingKey(message.id);
+    setError(null);
+    try {
+      await onInjectIntoMain({
+        mode,
+        text: selectedText || message.text,
+        selectedBlocks: selectedSegments.length ? selectedSegments : undefined,
+        sourceBranchId: branch.id,
+      });
+      setSelectedSegments([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not insert into Main");
+    } finally {
+      setInjectingKey(null);
+    }
   }
 
   // Keep Side Chat defaulted to Main's active model when opening a fresh branch.
@@ -217,7 +276,7 @@ export function SideBranchPane({
             <input
               type="text"
               value={nameDraft}
-              autoFocus
+              ref={focusRenameInput}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => void commitRename()}
               onKeyDown={(e) => {
@@ -256,19 +315,16 @@ export function SideBranchPane({
             variant="outline"
             size="sm"
             onClick={() => {
-              const picked =
-                selectedSegmentList.length > 0
-                  ? selectedSegmentList.join("\n\n")
-                  : latestAssistantText;
-              onOpenMergeReview(picked);
+              onOpenMergeReview(
+                selectedText || latestAssistantText,
+                selectedSegments.length ? selectedSegments : undefined,
+              );
             }}
             className="h-6 gap-1 px-2 text-[11px] text-success"
           >
             <GitMerge className="size-3" />
             <span>
-              {selectedSegmentList.length > 0
-                ? `Merge (${selectedSegmentList.length})`
-                : "Merge"}
+              {selectedSegments.length > 0 ? `Merge (${selectedSegments.length})` : "Merge"}
             </span>
           </Button>
 
@@ -288,13 +344,7 @@ export function SideBranchPane({
       {/* Pinned Focus Quote from Main */}
       {focusQuote ? (
         <div className="border-b border-border/70 bg-muted/40 px-3.5 py-2 text-xs">
-          <div className="mb-0.5 flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            <span>Branched Focus from Main</span>
-            <Badge variant="outline" className="h-4 px-1 text-[9px]">
-              {projectId.slice(0, 6)}
-            </Badge>
-          </div>
-          <p className="line-clamp-3 border-l-2 border-success/60 pl-2 text-foreground/90">
+          <p className="max-h-28 overflow-auto border-l-2 border-success/60 pl-2 text-foreground/90">
             “{focusQuote}”
           </p>
         </div>
@@ -309,9 +359,7 @@ export function SideBranchPane({
           </div>
         ) : messages.length === 0 ? (
           <Card className="border-dashed border-border bg-card/40 p-3 text-xs text-muted-foreground">
-            Ask a follow-up question in this isolated side thread (Main stays untouched). When you
-            like an answer, click <strong>Insert at spot</strong>, <strong>Replace spot</strong>,{" "}
-            <strong>Drop as Block</strong>, or open the full <strong>Merge</strong> modal.
+            Ask a follow-up, then select the reply blocks you want to bring into Main.
           </Card>
         ) : (
           messages.map((msg) => (
@@ -320,10 +368,10 @@ export function SideBranchPane({
               className={`flex flex-col gap-1.5 ${msg.role === "user" ? "items-end" : "items-start"}`}
             >
               <div
-                className={`max-w-[92%] rounded-2xl px-3.5 py-2.5 text-xs ${
+                className={`text-sm ${
                   msg.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "border border-border bg-card text-foreground"
+                    ? "max-w-[92%] rounded-2xl bg-primary px-3.5 py-2.5 text-primary-foreground"
+                    : "w-full min-w-0 text-foreground"
                 }`}
               >
                 {msg.modelLabel ? (
@@ -333,31 +381,53 @@ export function SideBranchPane({
                 ) : null}
                 {msg.role === "assistant" ? (
                   <div className="space-y-1.5">
-                    {buildSmartSegments(msg.text).map((seg, sIdx) => {
-                      const segKey = `${msg.id}:${seg.id}:${sIdx}`;
-                      const checked = Boolean(selectedSegments[segKey]);
-                      return (
-                        <div
-                          key={segKey}
-                          onClick={() => toggleSegmentSelection(segKey, seg.markdown)}
-                          className={`group/sseg flex cursor-pointer items-start gap-2 rounded-lg px-1.5 py-1 transition-colors ${
-                            checked
-                              ? "bg-success/15 ring-1 ring-success/50"
-                              : "hover:bg-muted/50"
-                          }`}
-                        >
-                          <Checkbox
-                            checked={checked}
-                            onCheckedChange={() => toggleSegmentSelection(segKey, seg.markdown)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="mt-1 shrink-0"
-                          />
-                          <div className="min-w-0 flex-1 text-xs leading-relaxed">
-                            <ChatMarkdown>{seg.markdown}</ChatMarkdown>
+                    {buildSmartSegments(msg.text)
+                      .flatMap((seg, index) => {
+                        const blockId = `${msg.id}:${seg.id}:${index}`;
+                        return (
+                          splitBlocks[blockId]?.map((block) => ({ block, canSplit: false })) ?? [
+                            {
+                              block: { messageId: msg.id, blockId, markdown: seg.markdown },
+                              canSplit:
+                                seg.blockType === "paragraph" &&
+                                hasMultipleSentences(seg.plainText),
+                            },
+                          ]
+                        );
+                      })
+                      .map(({ block, canSplit }, index) => {
+                        const checked = selectedSegments.some(
+                          (item) => item.blockId === block.blockId,
+                        );
+                        return (
+                          <div
+                            key={block.blockId}
+                            className={`flex items-start gap-2 rounded-lg border border-border bg-card px-2.5 py-2 ${checked ? "ring-1 ring-success/60" : ""}`}
+                          >
+                            <Checkbox
+                              checked={checked}
+                              aria-label={`Select reply block ${index + 1}`}
+                              onCheckedChange={() => toggleSegmentSelection(block)}
+                              className="mt-1 shrink-0"
+                            />
+                            <div className="min-w-0 flex-1 text-xs leading-relaxed">
+                              <ChatMarkdown>{block.markdown}</ChatMarkdown>
+                            </div>
+                            {canSplit ? (
+                              <Button
+                                type="button"
+                                size="icon-xs"
+                                variant="ghost"
+                                title="Split into sentences"
+                                aria-label={`Split reply block ${index + 1} into sentences`}
+                                onClick={() => splitBlock(block)}
+                              >
+                                <Scissors className="size-3.5" />
+                              </Button>
+                            ) : null}
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
                   </div>
                 ) : (
                   <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
@@ -370,23 +440,12 @@ export function SideBranchPane({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={injectingKey === `${msg.id}:insert`}
-                    onClick={async () => {
-                      setInjectingKey(`${msg.id}:insert`);
-                      try {
-                        await onInjectIntoMain({
-                          mode: "insert_spot",
-                          text: msg.text,
-                          sourceBranchId: branch.id,
-                        });
-                      } finally {
-                        setInjectingKey(null);
-                      }
-                    }}
+                    disabled={Boolean(injectingKey)}
+                    onClick={() => void inject("insert_spot", msg)}
                     className="h-6 gap-1 px-2 text-[10px] text-success"
                   >
                     <ArrowDownToLine className="size-3" />
-                    <span>Insert at spot</span>
+                    <span>{selectedSegments.length ? "Insert selected" : "Insert at spot"}</span>
                   </Button>
 
                   {focusQuote ? (
@@ -394,23 +453,14 @@ export function SideBranchPane({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={injectingKey === `${msg.id}:replace`}
-                      onClick={async () => {
-                        setInjectingKey(`${msg.id}:replace`);
-                        try {
-                          await onInjectIntoMain({
-                            mode: "replace_spot",
-                            text: msg.text,
-                            sourceBranchId: branch.id,
-                          });
-                        } finally {
-                          setInjectingKey(null);
-                        }
-                      }}
+                      disabled={Boolean(injectingKey)}
+                      onClick={() => void inject("replace_spot", msg)}
                       className="h-6 gap-1 px-2 text-[10px] text-sky-400"
                     >
                       <Check className="size-3" />
-                      <span>Replace spot</span>
+                      <span>
+                        {selectedSegments.length ? "Replace with selected" : "Replace spot"}
+                      </span>
                     </Button>
                   ) : null}
 
@@ -418,23 +468,12 @@ export function SideBranchPane({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={injectingKey === `${msg.id}:block`}
-                    onClick={async () => {
-                      setInjectingKey(`${msg.id}:block`);
-                      try {
-                        await onInjectIntoMain({
-                          mode: "drop_block",
-                          text: msg.text,
-                          sourceBranchId: branch.id,
-                        });
-                      } finally {
-                        setInjectingKey(null);
-                      }
-                    }}
+                    disabled={Boolean(injectingKey)}
+                    onClick={() => void inject("drop_block", msg)}
                     className="h-6 gap-1 px-2 text-[10px]"
                   >
                     <BookmarkPlus className="size-3" />
-                    <span>Drop as Block</span>
+                    <span>{selectedSegments.length ? "Append selected" : "Append reply"}</span>
                   </Button>
                 </div>
               ) : null}
@@ -452,19 +491,47 @@ export function SideBranchPane({
         <div ref={scrollEndRef} />
       </div>
 
-      {/* Sticky bar when specific segments are checked in Side Chat */}
-      {selectedSegmentList.length > 0 ? (
-        <div className="flex items-center justify-between gap-2 border-t border-success/40 bg-success/10 px-3.5 py-2 text-xs">
-          <span className="font-medium text-success">
-            {selectedSegmentList.length}{" "}
-            {selectedSegmentList.length === 1 ? "segment" : "segments"} selected
-          </span>
+      {selectedSegments.length > 0 ? (
+        <div className="space-y-2 border-t border-border bg-card px-3.5 py-2 text-xs">
+          <div className="font-medium">
+            {selectedSegments.length} {selectedSegments.length === 1 ? "block" : "blocks"} selected
+          </div>
+          <ol className="rk-scroll max-h-36 space-y-1 overflow-y-auto">
+            {selectedSegments.map((block, index) => (
+              <li
+                key={block.blockId}
+                className="flex items-center gap-1 rounded-md border border-border px-2 py-1"
+              >
+                <span className="min-w-0 flex-1 truncate">{block.markdown}</span>
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={`Move selected block ${index + 1} up`}
+                  disabled={index === 0}
+                  onClick={() => moveSelection(index, -1)}
+                >
+                  <ArrowUp className="size-3" />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={`Move selected block ${index + 1} down`}
+                  disabled={index === selectedSegments.length - 1}
+                  onClick={() => moveSelection(index, 1)}
+                >
+                  <ArrowDown className="size-3" />
+                </Button>
+              </li>
+            ))}
+          </ol>
           <div className="flex items-center gap-1.5">
             <Button
               type="button"
               size="sm"
               variant="ghost"
-              onClick={() => setSelectedSegments({})}
+              onClick={() => setSelectedSegments([])}
               className="h-6 px-2 text-[11px]"
             >
               Clear
@@ -472,7 +539,7 @@ export function SideBranchPane({
             <Button
               type="button"
               size="sm"
-              onClick={() => onOpenMergeReview(selectedSegmentList.join("\n\n"))}
+              onClick={() => onOpenMergeReview(selectedText, selectedSegments)}
               className="h-6 gap-1 bg-success px-2.5 text-[11px] text-white hover:bg-success/90"
             >
               <GitMerge className="size-3" />

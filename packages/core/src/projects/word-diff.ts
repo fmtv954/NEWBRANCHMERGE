@@ -3,6 +3,7 @@ import { diffWordsWithSpace } from "diff";
 import {
   clampToGraphemeBoundary,
   parseMarkdownToCanonicalBlocks,
+  parseMarkdownWithSource,
 } from "../blocks/canonical-blocks.js";
 
 export interface WordDiffToken {
@@ -72,7 +73,7 @@ export interface SmartSegment {
  * while preserving original Markdown formatting for uniform rendering.
  */
 export function buildSmartSegments(markdown: string): SmartSegment[] {
-  const blocks = parseMarkdownToCanonicalBlocks(markdown);
+  const blocks = parseMarkdownWithSource(markdown);
   if (blocks.length === 0) {
     const trimmed = markdown.trim();
     if (!trimmed) return [];
@@ -85,10 +86,10 @@ export function buildSmartSegments(markdown: string): SmartSegment[] {
       },
     ];
   }
-  return blocks.map((block, idx) => ({
+  return blocks.map(({ block, markdown }, idx) => ({
     id: block.stableBlockId || `seg_${idx}`,
     blockType: block.blockType,
-    markdown: formatBlockAsMarkdown(block),
+    markdown,
     plainText: block.canonicalText,
   }));
 }

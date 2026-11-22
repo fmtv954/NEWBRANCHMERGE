@@ -16,7 +16,7 @@ import { UserRound } from "lucide-react";
 import { memo, useCallback, useMemo, useState } from "react";
 import { A2uiSurfaceCard } from "../../../components/a2ui/A2uiSurfaceCard";
 import { CollaborationMarker } from "../../../components/ai/CollaborationMarker";
-import { SmartSegmentedMessage } from "../../../components/branching/SmartSegmentedMessage";
+import { InlineMessageCanvas } from "../../../components/branching/InlineMessageCanvas";
 import { ComputerCard } from "../../../components/computers/ComputerCard";
 import { ArtifactFileCard } from "../../../components/messages/ArtifactFileCard";
 import { AskCard } from "../../../components/messages/AskCard";
@@ -44,7 +44,7 @@ import { messageProviderLabel } from "../../../lib/integrations/messaging";
 import type { ArtifactTarget } from "../../../lib/pages/artifact-open";
 import type { PageBlock } from "../../../lib/pages/page-cards";
 import { useOpenPage } from "../../../lib/pages/pages";
-import type { createSpaceRpc } from "../../../lib/query/rpc";
+import type { createSpaceRpc, RpcClient } from "../../../lib/query/rpc";
 import type { ImportSetupTarget } from "../bots/import-setup-card";
 import { ImportSetupCard } from "../bots/import-setup-card";
 import { ReplyLine } from "./chat-context";
@@ -96,8 +96,7 @@ export const MessageView = memo(function MessageView({
   projectId,
   branchId,
   onBranch,
-  reviewBlocksActive = false,
-  onSaveBlockOrder,
+  reviewBlocksActive,
   onCommitMessageMarkdown,
   onOpenRearrangeCanvas,
   onBranchBlockText,
@@ -159,10 +158,15 @@ export const MessageView = memo(function MessageView({
   branchId?: string | null;
   onBranch?: (message: ThreadMessage) => void;
   reviewBlocksActive?: boolean;
-  onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
-  onCommitMessageMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
-  onOpenRearrangeCanvas?: (messageId: string, markdown: string) => void;
-  onBranchBlockText?: (message: ThreadMessage, blockText: string) => void;
+  onCommitMessageMarkdown?: (
+    messageId: string,
+    updatedMarkdown: string,
+    blockIndex: number,
+    originalMarkdown: string,
+    client?: RpcClient,
+  ) => Promise<void>;
+  onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
+  onBranchBlockText?: (message: ThreadMessage, quote: string, sourceMarkdown: string) => void;
 }) {
   const { t } = useLingui();
   const [localBlockReview, setLocalBlockReview] = useState(false);
@@ -281,6 +285,48 @@ export const MessageView = memo(function MessageView({
       onReviewBlocks={() => setLocalBlockReview((v) => !v)}
     />
   );
+  function renderTextBlock(block: Extract<MessageBlock, { kind: "text" }>) {
+    const index = blocks.indexOf(block);
+    const storedBlock = message.blocks[index];
+    if (
+      !isLive &&
+      message.role === "bot" &&
+      onCommitMessageMarkdown &&
+      storedBlock?.kind === "text"
+    ) {
+      return (
+        <InlineMessageCanvas
+          messageId={message.id}
+          showBlocks={reviewBlocksActive || localBlockReview}
+          blockIndex={index}
+          markdown={storedBlock.text}
+          displayMarkdown={block.text}
+          renderMarkdown={(text) => (
+            <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
+              {text}
+            </ChatMarkdown>
+          )}
+          rpc={rpc}
+          projectId={projectId}
+          branchId={branchId}
+          onBranchSegment={
+            onBranchBlockText
+              ? (quote) => onBranchBlockText(message, quote, storedBlock.text)
+              : undefined
+          }
+          onCommitMarkdown={onCommitMessageMarkdown}
+          onRestoredRevision={onRefresh}
+          onOpenRearrangeCanvas={onOpenRearrangeCanvas}
+        />
+      );
+    }
+    return (
+      <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
+        {block.text}
+      </ChatMarkdown>
+    );
+  }
+
   if (isNarration) {
     if (visibleNarrationBlocks.length === 0) return null;
     if (isToolOnlyNarration(message.blocks, showToolActivity)) {
@@ -297,11 +343,11 @@ export const MessageView = memo(function MessageView({
     return (
       <>
         {messageContext}
-        <div className="relative w-fit max-w-full [@media(hover:none)]:w-full">
-          <div className="flex w-fit max-w-full justify-start [@media(hover:none)]:w-full">
+        <div className="relative w-fit max-w-full has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full">
+          <div className="flex w-fit max-w-full justify-start has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full">
             <div
               data-testid="message-bot-bubble"
-              className="max-w-full space-y-2.5 rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground"
+              className="max-w-full space-y-2.5 rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground has-data-[canvas-editing]:w-full"
               dir="auto"
             >
               {visibleNarrationBlocks.map((block, i) => {
@@ -327,13 +373,13 @@ export const MessageView = memo(function MessageView({
                       key={i}
                       data-quote-message-id={block.kind === "text" ? quoteMessageId : undefined}
                     >
-                      <ChatMarkdown
-                        streaming={block.kind === "progress"}
-                        renderMention={renderMention}
-                        onOpenPage={openPage}
-                      >
-                        {block.text}
-                      </ChatMarkdown>
+                      {block.kind === "text" ? (
+                        renderTextBlock(block)
+                      ) : (
+                        <ChatMarkdown streaming renderMention={renderMention} onOpenPage={openPage}>
+                          {block.text}
+                        </ChatMarkdown>
+                      )}
                     </div>
                   );
                 }
@@ -658,37 +704,14 @@ export const MessageView = memo(function MessageView({
             return (
               <div
                 key={i}
-                className="relative flex w-fit max-w-full justify-start [@media(hover:none)]:w-full [@media(hover:none)]:flex-wrap"
+                className="relative flex w-fit max-w-full justify-start has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full [@media(hover:none)]:flex-wrap"
               >
                 <div
                   data-testid="message-bot-bubble"
-                  className="max-w-full rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground"
+                  className="max-w-full rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground has-data-[canvas-editing]:w-full"
                   dir="auto"
                 >
-                  <div data-quote-message-id={quoteMessageId}>
-                    {!isLive && onCommitMessageMarkdown ? (
-                      <SmartSegmentedMessage
-                        messageId={message.id}
-                        markdown={block.text}
-                        rpc={rpc}
-                        projectId={projectId}
-                        branchId={branchId}
-                        showOutlines={reviewBlocksActive}
-                        onBranchSegment={
-                          onBranchBlockText
-                            ? (quote) => onBranchBlockText(message, quote)
-                            : undefined
-                        }
-                        onCommitMarkdown={onCommitMessageMarkdown}
-                        onRestoredRevision={onRefresh}
-                        onOpenRearrangeCanvas={onOpenRearrangeCanvas}
-                      />
-                    ) : (
-                      <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
-                        {block.text}
-                      </ChatMarkdown>
-                    )}
-                  </div>
+                  <div data-quote-message-id={quoteMessageId}>{renderTextBlock(block)}</div>
                   {voiceReady ? (
                     <Button
                       variant="text"
