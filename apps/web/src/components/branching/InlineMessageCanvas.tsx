@@ -1,5 +1,5 @@
 import { Button, Popover, PopoverContent, PopoverTrigger } from "@rakazo/ui-web";
-import { Check, GitBranch, History, Maximize2, RotateCcw, RotateCw } from "lucide-react";
+import { Check, GitBranch, History, Maximize2, RotateCcw, RotateCw, Undo2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { useSave } from "../../lib/query/query";
@@ -25,6 +25,7 @@ export function InlineMessageCanvas({
   onRestoredRevision,
   onOpenRearrangeCanvas,
   onRegenerate,
+  onUndoMerge,
 }: {
   messageId: string;
   blockIndex: number;
@@ -46,6 +47,7 @@ export function InlineMessageCanvas({
   onRestoredRevision?: () => Promise<void>;
   onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
   onRegenerate?: () => void;
+  onUndoMerge?: () => Promise<void> | void;
 }) {
   const [draft, setDraft] = useState(markdown);
   const [error, setError] = useState<string>();
@@ -238,6 +240,18 @@ export function InlineMessageCanvas({
               )}
             </PopoverContent>
           </Popover>
+        ) : null}
+        {onUndoMerge ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            onClick={() => void onUndoMerge()}
+            className="h-6 gap-1 px-1.5 text-[11px] text-amber-400 hover:text-amber-300"
+          >
+            <Undo2 className="size-3" />
+            <span>Undo</span>
+          </Button>
         ) : null}
         {savedFlash ? (
           <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] text-success">

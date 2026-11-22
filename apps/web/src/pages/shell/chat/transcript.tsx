@@ -772,6 +772,19 @@ export const Transcript = memo(function Transcript({
                       onCommitMessageMarkdown={onCommitMessageMarkdown}
                       onOpenRearrangeCanvas={onOpenRearrangeCanvas}
                       onRegenerate={onRegenerateMessage}
+                      onUndoMerge={
+                        mergeReceipts && mergeReceipts.length > 0
+                          ? async () => {
+                              const receipt = mergeReceipts[0]!;
+                              await rpc.merges.undo({
+                                mergeReceiptId: receipt.id,
+                                idempotencyKey: crypto.randomUUID(),
+                              });
+                              onDismissMergeReceipt?.(receipt.id);
+                              await onRefresh();
+                            }
+                          : undefined
+                      }
                       onBranchBlockText={
                         onInstantBranch
                           ? (msg, quoteText, sourceMarkdown) =>
@@ -920,37 +933,7 @@ export const Transcript = memo(function Transcript({
             }}
           />
         ) : null}
-        {mergeReceipts && mergeReceipts.length > 0 ? (
-          <div className="flex items-center gap-2">
-            <div className="flex-1">
-              <MergeReceiptBanner
-                key={mergeReceipts[0]!.id}
-                acceptedCount={mergeReceipts[0]!.acceptedCount}
-                onUndo={async () => {
-                  await rpc.merges.undo({
-                    mergeReceiptId: mergeReceipts[0]!.id,
-                    idempotencyKey: crypto.randomUUID(),
-                  });
-                  onDismissMergeReceipt?.(mergeReceipts[0]!.id);
-                  await onRefresh();
-                }}
-              />
-            </div>
-            {onDismissMergeReceipt ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-label="Dismiss merge receipt"
-                onClick={() => onDismissMergeReceipt(mergeReceipts[0]!.id)}
-                className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-              >
-                ×
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-        {/* Extra bottom clearance so injected blocks, merge reviews, and receipts never hide behind the floating Composer */}
+        {/* Pure Main stream: no MergeReceiptBanner line inside chat; Undo lives inline beside Branch · Regenerate · Expand · History */}
         <div className="h-24 shrink-0" aria-hidden="true" />
       </div>
       {quoteDraft ? (

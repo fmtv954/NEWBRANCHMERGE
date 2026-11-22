@@ -16,6 +16,7 @@ import {
   ArrowUp,
   BookmarkPlus,
   Check,
+  Columns3,
   GitBranch,
   GitMerge,
   Loader2,
@@ -63,6 +64,7 @@ export function SideBranchPane({
   onRenameBranch,
   onInjectIntoMain,
   onOpenMergeReview,
+  onOpenCompareArena,
   onClose,
 }: {
   rpc: ReturnType<typeof createSpaceRpc>;
@@ -78,6 +80,7 @@ export function SideBranchPane({
     sourceBranchId: string;
   }) => Promise<void>;
   onOpenMergeReview: (selectedText?: string, selectedBlocks?: MergeSourceBlock[]) => void;
+  onOpenCompareArena?: () => void;
   onClose: () => void;
 }) {
   const { defaultMainModelKey } = useUnifiedModels(activeBot);
@@ -310,6 +313,20 @@ export function SideBranchPane({
             <Sparkles className="size-2.5 text-sky-400" />
             <span>{contextMode === "only_selection" ? "Focus only" : "Full chat + focus"}</span>
           </button>
+
+          {onOpenCompareArena ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              title="Compare 2–4 models in parallel with AI difference analysis"
+              onClick={onOpenCompareArena}
+              className="h-6 gap-1 px-2 text-[11px] text-sky-400 hover:text-sky-300"
+            >
+              <Columns3 className="size-3" />
+              <span>Compare</span>
+            </Button>
+          ) : null}
 
           <Button
             type="button"

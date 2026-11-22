@@ -2,7 +2,7 @@ import { useLingui } from "@lingui/react/macro";
 import type { Bot, Branch, Group, ThreadSnapshot } from "@rakazo/contracts";
 import { MEETING_CALENDAR_RETURN_PARAM } from "@rakazo/contracts";
 import { BotAvatar, Button, GroupAvatar } from "@rakazo/ui-web";
-import { Columns2, Columns3, Gift, GitBranch, GitMerge, Layers, Menu, Phone, Video } from "lucide-react";
+import { Columns2, Gift, GitBranch, GitMerge, Layers, Menu, Phone, Video } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useBilling } from "../../../components/billing/SubscriptionGate";
@@ -37,7 +37,6 @@ export function ChatHeader({
   onToggleSplitView,
   reviewBlocksOpen,
   onToggleReviewBlocks,
-  onOpenCompareArena,
   showArchivedBranches,
   onToggleShowArchivedBranches,
 }: {
@@ -63,7 +62,6 @@ export function ChatHeader({
   onToggleSplitView?: () => void;
   reviewBlocksOpen?: boolean;
   onToggleReviewBlocks?: () => void;
-  onOpenCompareArena?: () => void;
   showArchivedBranches?: boolean;
   onToggleShowArchivedBranches?: () => void;
 }) {
@@ -151,21 +149,6 @@ export function ChatHeader({
             >
               <Layers className="size-3.5" />
               <span className="hidden lg:inline">Blocks</span>
-            </Button>
-          </IconTooltip>
-        ) : null}
-        {onOpenCompareArena ? (
-          <IconTooltip label="Multi-Modal Compare Arena (Text, Image & Video)">
-            <Button
-              type="button"
-              variant="floating"
-              size="sm"
-              aria-label="Compare Models"
-              onClick={onOpenCompareArena}
-              className="app-no-drag h-7 gap-1 px-2 text-label font-medium"
-            >
-              <Columns3 className="size-3.5 text-sky-400" />
-              <span className="hidden lg:inline">Compare</span>
             </Button>
           </IconTooltip>
         ) : null}

@@ -38,12 +38,12 @@ export function onboardingRoutes(ctx: RouterContext) {
         );
         return { ok: true as const };
       }),
-      start: authed.onboarding.start.handler(async ({ context, input }) => {
-        await startOnboarding(onboardingDeps, context.actor, input.botId);
+      start: authed.onboarding.start.handler(async () => {
+        // CLONE: keep newly created bots on a clean empty canvas with zero onboarding cards or wasted LLM tokens.
         return { ok: true as const };
       }),
-      promptFocus: authed.onboarding.promptFocus.handler(async ({ context, input }) => {
-        await promptFocus(onboardingDeps, context.actor, input.botId);
+      promptFocus: authed.onboarding.promptFocus.handler(async () => {
+        // CLONE: disabled to prevent "what would you like this bot for?" card and background token burn.
         return { ok: true as const };
       }),
       choose: authed.onboarding.choose.handler(async ({ context, input }) => {

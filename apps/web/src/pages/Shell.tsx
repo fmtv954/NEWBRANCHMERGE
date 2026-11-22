@@ -1391,7 +1391,6 @@ function SpaceShell() {
               }}
               reviewBlocksOpen={reviewBlocksOpen}
               onToggleReviewBlocks={() => setReviewBlocksOpen((v) => !v)}
-              onOpenCompareArena={() => setCompareArenaOpen(true)}
               onCall={(bot) => {
                 if (call?.botId === bot.id) {
                   setCallMinimized(false);
@@ -1696,6 +1695,7 @@ function SpaceShell() {
                 setMergeSelection({ text: text ?? "", blocks });
                 setMergeModalOpen(true);
               }}
+              onOpenCompareArena={() => setCompareArenaOpen(true)}
               onClose={() => setSideBranch(null)}
             />
           ) : null}

@@ -1852,13 +1852,13 @@ export function createProjectsService(prisma: PrismaClient) {
                 temperature: 0.5,
                 maxTokens: 900,
                 instruction:
-                  "Response style: BALANCED. Give a clear, focused answer with only essential supporting context. Do not recap Main.",
+                  "Response style: BALANCED. Format for high readability: use concise **bold lead-ins** on bullets, short 2-3 sentence paragraphs, clear headings (###) for multi-part answers, subtle dividers (---) when shifting topics, and Markdown [Source](https://...) links when citing references. Do not recap Main.",
               }
             : {
                 temperature: 0.7,
                 maxTokens: 2400,
                 instruction:
-                  "Response style: DEEP. Provide a thorough, structured breakdown of the requested sub-topic without repeating content already in Main.",
+                  "Response style: DEEP. Format like a frontier research brief: clear section headings (## / ###), **bold lead-ins** on key points, short scannable paragraphs, horizontal rules (---) between major sections, tables where comparing options, and clickable Markdown [Source](https://...) citations. Never repeat content already in Main.",
               };
 
       const llmMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
@@ -2009,8 +2009,8 @@ export function createProjectsService(prisma: PrismaClient) {
       },
     ) {
       const sys = input.personaPrompt?.trim()
-        ? `${input.personaPrompt.trim()}\n\nAnswer the user's prompt directly, clearly, and concisely using clean Markdown.`
-        : "Answer the user's prompt directly, clearly, and concisely using clean Markdown.";
+        ? `${input.personaPrompt.trim()}\n\nFormat for frontier readability: use clear headings, **bold lead-ins** on bullets, short scannable paragraphs, and Markdown [Source](https://...) links where citing references.`
+        : "Answer directly with frontier readability: use clear headings, **bold lead-ins** on bullets, short scannable paragraphs, horizontal rules (---) between major shifts, and Markdown [Source](https://...) links where citing references.";
 
       const results = await Promise.all(
         input.models.map(async (m) => {

@@ -126,3 +126,83 @@ body,
   background-color: var(--primary);
   color: var(--primary-foreground);
 }
+
+/* CLONE: 100% containerless raw BlockNote + Frontier Readability Typography + Clickable Source Pills */
+.clone-raw-blocknote,
+.clone-raw-blocknote .bn-container,
+.clone-raw-blocknote .bn-editor {
+  --bn-colors-editor-background: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+
+.clone-raw-blocknote .bn-editor {
+  max-width: 72ch;
+  line-height: 1.65;
+  color: var(--foreground);
+}
+
+.clone-raw-blocknote .bn-block-content[data-content-type="heading"] {
+  margin-top: 0.9rem;
+  margin-bottom: 0.3rem;
+  letter-spacing: -0.015em;
+  font-weight: 650;
+}
+
+.clone-raw-blocknote .bn-block-content[data-content-type="paragraph"] {
+  margin-bottom: 0.2rem;
+}
+
+.clone-raw-blocknote strong,
+.clone-raw-blocknote b {
+  font-weight: 650;
+  color: var(--foreground);
+}
+
+.clone-raw-blocknote hr {
+  border: none;
+  border-top: 1px solid color-mix(in oklab, var(--border) 75%, transparent);
+  margin: 1rem 0;
+}
+
+.clone-raw-blocknote blockquote {
+  border-left: 3px solid color-mix(in oklab, var(--success) 65%, transparent);
+  padding-left: 0.85rem;
+  color: var(--muted-foreground);
+}
+
+/* Clickable inline Source Citation Pills (ChatGPT / Perplexity style) */
+.clone-raw-blocknote a[href^="http"],
+[data-testid="message-bot-bubble"] a[href^="http"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.08rem 0.45rem;
+  margin: 0 0.12rem;
+  border-radius: 9999px;
+  font-size: 0.78em;
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--muted) 85%, transparent);
+  border: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
+  vertical-align: baseline;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.clone-raw-blocknote a[href^="http"]::before,
+[data-testid="message-bot-bubble"] a[href^="http"]::before {
+  content: "↗";
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+.clone-raw-blocknote a[href^="http"]:hover,
+[data-testid="message-bot-bubble"] a[href^="http"]:hover {
+  background: color-mix(in oklab, var(--success) 16%, var(--muted));
+  border-color: color-mix(in oklab, var(--success) 55%, transparent);
+}

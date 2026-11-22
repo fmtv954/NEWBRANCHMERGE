@@ -100,6 +100,7 @@ export const MessageView = memo(function MessageView({
   onCommitMessageMarkdown,
   onOpenRearrangeCanvas,
   onRegenerate,
+  onUndoMerge,
   onBranchBlockText,
 }: {
   artifactTarget: ArtifactTarget;
@@ -168,6 +169,7 @@ export const MessageView = memo(function MessageView({
   ) => Promise<void>;
   onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
   onRegenerate?: (message: ThreadMessage) => void;
+  onUndoMerge?: () => Promise<void> | void;
   onBranchBlockText?: (message: ThreadMessage, quote: string, sourceMarkdown: string) => void;
 }) {
   const { t } = useLingui();
@@ -320,6 +322,7 @@ export const MessageView = memo(function MessageView({
           onRestoredRevision={onRefresh}
           onOpenRearrangeCanvas={onOpenRearrangeCanvas}
           onRegenerate={onRegenerate ? () => onRegenerate(message) : undefined}
+          onUndoMerge={onUndoMerge}
         />
       );
     }
@@ -718,8 +721,8 @@ export const MessageView = memo(function MessageView({
                   className={cn(
                     "max-w-full text-body-lg text-foreground",
                     isRawCanvas
-                      ? "w-full bg-transparent px-0 py-1"
-                      : "rounded-2xl bg-muted px-[18px] py-3",
+                      ? "w-full border-0 bg-transparent p-0 shadow-none"
+                      : "bg-transparent px-1 py-1",
                   )}
                   dir="auto"
                 >

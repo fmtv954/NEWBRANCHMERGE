@@ -111,7 +111,10 @@ export function NotionBlockCanvas({
     )
     .join(",");
   return (
-    <div className="flex min-h-0 flex-col" data-merge-canvas={canvasId}>
+    <div
+      className={`flex min-h-0 flex-col ${variant === "raw" ? "clone-raw-blocknote bg-transparent" : ""}`}
+      data-merge-canvas={canvasId}
+    >
       {variant === "studio" ? (
         <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/40 px-2 py-1">
         <Button
