@@ -722,6 +722,7 @@ model Space {
   agentSkillSpaces            AgentSkillSpace[]
   mcpServerSpaces             McpServerSpace[]
   capabilityInstallSpaces     CapabilityInstallSpace[]
+  projects                    Project[]
 
   @@unique([id, organizationId])
   @@index([organizationId, createdAt])
@@ -1020,8 +1021,10 @@ model Bot {
   children          Bot[]             @relation("BotChildren")
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
+  isDefaultAssistant Boolean          @default(false)
   thread            Thread?           @relation("BotThread")
   helperThreads     Thread[]          @relation("BotHelperThreads")
+  assistantThreads  Thread[]          @relation("AssistantThreads")
   computerId        String?
   computer          Computer?         @relation(fields: [computerId], references: [id], onDelete: SetNull)
   computerSwitching Boolean           @default(false)
@@ -1147,6 +1150,16 @@ model Thread {
   /// Set only on a background helper's own thread: the bot that started the helper owns it.
   helperBotId                 String?
   helperBot                   Bot?       @relation("BotHelperThreads", fields: [helperBotId], references: [id], onDelete: Cascade)
+  /// Non-unique assistant binding for independent chats & project branches under one default assistant.
+  assistantBotId              String?
+  assistantBot                Bot?       @relation("AssistantThreads", fields: [assistantBotId], references: [id], onDelete: SetNull)
+  projectId                   String?
+  project                     Project?   @relation("ProjectThreads", fields: [projectId], references: [id], onDelete: Cascade)
+  title                       String?
+  isTemporary                 Boolean    @default(false)
+  archivedAt                  DateTime?
+  pinnedAt                    DateTime?
+  branch                      Branch?
   groupId                     String?    @unique
   group                       ChatGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
   externalConversationId      String?    @unique
@@ -1170,6 +1183,8 @@ model Thread {
   @@index([spaceId])
   @@index([spaceId, userId])
   @@index([helperBotId])
+  @@index([assistantBotId])
+  @@index([projectId, archivedAt])
   @@map("threads")
 }
 
@@ -1218,6 +1233,8 @@ model Message {
   sourceRuns            Run[]             @relation("RunSourceMessage")
   externalTranscriptFor  ExternalMessage?
   steeringMessages SteeringMessage[]
+  activeRevisionId String?
+  revisions        MessageRevision[]
   createdAt        DateTime  @default(now())
 
   @@unique([threadId, seq])
@@ -1317,12 +1334,16 @@ model Run {
   botOutcomeReturnedAt DateTime?
   // What the run said is recorded for delivery to the chat app its turn came from.
   messagingMirroredAt  DateTime?
+  projectId            String?
+  branchId             String?
+  compareGroupId       String?
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
   attempts             Attempt[]
   effects              ExternalEffect[]
   steeringMessages     SteeringMessage[]
   externalMessage      ExternalMessage?
+  manifests            RunManifest[]
 
   @@unique([spaceId, clientNonce])
   @@index([status, wakeAt])
@@ -1339,6 +1360,8 @@ model Run {
   // Partial index runs_bot_outcome_pending_idx (unreturned bot-message outcomes) is created in SQL.
   // Partial index runs_helper_outcome_pending_idx (unreturned background-helper outcomes) is created in SQL.
   @@index([routineId, createdAt])
+  @@index([projectId, branchId, createdAt])
+  @@index([compareGroupId])
   @@map("runs")
 }
 
@@ -1568,8 +1591,11 @@ model Routine {
   nextRunAt      DateTime?
   /// Runs in a row the model provider refused for the account; each one spaces out the schedule.
   accountFailures Int      @default(0)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  /// "main_digest" | "dedicated_thread"
+  deliveryTarget  String   @default("main_digest")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deliveryStates  RoutineDeliveryState[]
   runs           Run[]
 
   @@index([active, nextRunAt])
@@ -2095,9 +2121,18 @@ model UsageRecord {
   /// Durable attribution, deliberately without lifecycle foreign keys.
   parentRunId        String?
   agentId            String?
+  projectId          String?
+  branchId           String?
+  artifactId         String?
+  billingRoute       String?
+  mediaDurationSec   Float?
+  mediaResolution    String?
+  estimatedMicros    BigInt?
+  settledMicros      BigInt?
   createdAt          DateTime @default(now())
 
   @@index([spaceId, userId, createdAt])
+  @@index([projectId, branchId, createdAt])
   @@map("usage_records")
 }
 
@@ -3013,4 +3048,507 @@ model MeetingCalendarBooking {
   @@id([connectionId, eventId])
   @@index([sessionId])
   @@map("meeting_calendar_bookings")
+}
+
+
+// ==============================================================================
+// CLONE Project Graph, Branch/Merge Engine & Atomic Holds (V1)
+// ==============================================================================
+
+model Project {
+  id               String            @id @default(cuid())
+  spaceId          String
+  space            Space             @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  ownerUserId      String
+  title            String
+  description      String            @default("")
+  /// "general" | "microdrama"
+  mode             String            @default("general")
+  instructions     String            @default("") @db.Text
+  memoryPolicyJson Json              @default("{}")
+  modelPolicyJson  Json              @default("{}")
+  defaultBotId     String?
+  mainThreadId     String?
+  archivedAt       DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  threads          Thread[]          @relation("ProjectThreads")
+  members          ProjectMember[]
+  branches         Branch[]
+  revisions        ProjectRevision[]
+  placements       Placement[]
+  runManifests     RunManifest[]
+  compareGroups    CompareGroup[]
+  dependencyEdges  DependencyEdge[]
+  mergeReviews     MergeReview[]
+  mergeReceipts    MergeReceipt[]
+  episodes         Episode[]
+  characterRefs    CharacterRef[]
+  propLocationRefs PropLocationRef[]
+
+  @@index([spaceId, archivedAt, updatedAt])
+  @@index([spaceId, mode])
+  @@map("projects")
+}
+
+model ProjectMember {
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  /// "owner" | "editor" | "viewer"
+  role      String   @default("editor")
+  createdAt DateTime @default(now())
+
+  @@id([projectId, userId])
+  @@index([userId])
+  @@map("project_members")
+}
+
+model Branch {
+  id                   String            @id @default(cuid())
+  projectId            String
+  project              Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  threadId             String            @unique
+  thread               Thread            @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parentBranchId       String?
+  parentBranch         Branch?           @relation("BranchHierarchy", fields: [parentBranchId], references: [id], onDelete: SetNull)
+  childBranches        Branch[]          @relation("BranchHierarchy")
+  rootMainBranchId     String?
+  name                 String
+  isMain               Boolean           @default(false)
+  headRevisionId       String?
+  defaultModelProvider String?
+  defaultModelId       String?
+  defaultThinkingLevel String?
+  archivedAt           DateTime?
+  createdByUserId      String
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  forkOrigin           BranchForkOrigin?
+  revisions            ProjectRevision[]
+  placements           Placement[]
+  runManifests         RunManifest[]
+  shotTakes            ShotTake[]
+  entityOverlays       BranchEntityOverlay[]
+
+  @@index([projectId, isMain, archivedAt])
+  @@index([parentBranchId])
+  @@map("branches")
+}
+
+model BranchForkOrigin {
+  id                      String   @id @default(cuid())
+  branchId                String   @unique
+  branch                  Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  sourceBranchId          String
+  sourceMessageId         String?
+  sourceMessageRevisionId String?
+  sourceArtifactId        String?
+  inheritedUpToSeq        Int      @default(0)
+  baseProjectRevisionId   String?
+  selectionRangeJson      Json?
+  /// "through_message" | "only_selection" | "custom"
+  contextMode             String   @default("through_message")
+  pinnedRefIdsJson        Json     @default("[]")
+  permissionScope         String   @default("project")
+  createdAt               DateTime @default(now())
+
+  @@index([sourceBranchId])
+  @@index([sourceMessageId])
+  @@map("branch_fork_origins")
+}
+
+model ProjectRevision {
+  id               String            @id @default(cuid())
+  projectId        String
+  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  branchId         String
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  parentRevisionId String?
+  parentRevision   ProjectRevision?  @relation("ProjectRevisionChain", fields: [parentRevisionId], references: [id], onDelete: SetNull)
+  childRevisions   ProjectRevision[] @relation("ProjectRevisionChain")
+  revisionNumber   Int
+  authorUserId     String
+  /// "message_commit" | "keep_placement" | "move_placement" | "merge_apply" | "merge_undo" | "artifact_edit"
+  eventType        String
+  stateDeltaJson   Json              @default("{}")
+  mergeReceiptId   String?
+  createdAt        DateTime          @default(now())
+
+  @@unique([branchId, revisionNumber])
+  @@index([projectId, createdAt])
+  @@map("project_revisions")
+}
+
+model MessageRevision {
+  id            String                @id @default(cuid())
+  messageId     String
+  message       Message               @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  version       Int
+  canonicalText String                @db.Text
+  blocksJson    Json                  @default("[]")
+  /// "initial" | "user_edit" | "regenerate" | "merge_apply"
+  sourceAction  String                @default("initial")
+  runId         String?
+  createdAt     DateTime              @default(now())
+  blocks        ContentBlockVersion[]
+
+  @@unique([messageId, version])
+  @@index([messageId, createdAt])
+  @@map("message_revisions")
+}
+
+model ContentBlockVersion {
+  id                String          @id @default(cuid())
+  messageRevisionId String
+  messageRevision   MessageRevision @relation(fields: [messageRevisionId], references: [id], onDelete: Cascade)
+  stableBlockId     String
+  /// "paragraph" | "heading" | "list_item" | "code" | "blockquote" | "table"
+  blockType         String
+  orderIndex        Int
+  canonicalText     String          @db.Text
+  language          String?
+  textDigest        String
+  utf16Length       Int
+
+  @@unique([messageRevisionId, orderIndex])
+  @@index([stableBlockId])
+  @@map("content_block_versions")
+}
+
+model Placement {
+  id                 String    @id @default(cuid())
+  projectId          String
+  project            Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetBranchId     String
+  targetBranch       Branch    @relation(fields: [targetBranchId], references: [id], onDelete: Cascade)
+  sourceBranchId          String
+  sourceMessageId         String?
+  sourceMessageRevisionId String?
+  sourceBlockIdsJson      Json?
+  sourceRangeJson         Json?
+  sourceRangeDigest       String?
+  artifactId              String?
+  excerptText        String?   @db.Text
+  label              String
+  /// "after_message" | "before_message" | "after_placement" | "end_of_main"
+  anchorKind         String    @default("after_message")
+  anchorId           String?
+  sortOrder          Int       @default(0)
+  useInNextMessage   Boolean   @default(false)
+  pinnedAsContext    Boolean   @default(false)
+  originalRunId      String?
+  originalCostMicros BigInt?
+  clientNonce        String?
+  originCreatedAt    DateTime
+  insertedAt         DateTime  @default(now())
+  removedAt          DateTime?
+
+  @@unique([targetBranchId, clientNonce])
+  @@index([targetBranchId, removedAt, sortOrder])
+  @@index([projectId, sourceBranchId])
+  @@map("placements")
+}
+
+model RunManifest {
+  id                       String   @id @default(cuid())
+  runId                    String
+  run                      Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  projectId                String
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  branchId                 String
+  branch                   Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  stepIndex                Int      @default(0)
+  attemptIndex             Int      @default(0)
+  /// "standard" | "temporary_redacted"
+  retentionPolicy          String   @default("standard")
+  requestedProvider        String
+  requestedModelId         String
+  resolvedProvider         String?
+  resolvedModelId          String?
+  resolvedModelVersion     String?
+  /// "subscription" | "byok" | "hosted_credits" | "local"
+  billingRoute             String
+  inputTurnsJson           Json     @default("[]")
+  includedPlacementIdsJson Json     @default("[]")
+  includedArtifactIdsJson  Json     @default("[]")
+  omittedItemsJson         Json     @default("[]")
+  compressionSummary       String?  @db.Text
+  tokenBudget              Int?
+  actualInputTokens        Int?
+  actualOutputTokens       Int?
+  estimatedCostMicros      BigInt?
+  settledCostMicros        BigInt?
+  toolPermissionsJson      Json     @default("{}")
+  createdAt                DateTime @default(now())
+
+  @@unique([runId, stepIndex, attemptIndex])
+  @@index([runId])
+  @@index([projectId, branchId, createdAt])
+  @@map("run_manifests")
+}
+
+model CompareGroup {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceBranchId  String
+  sourceMessageId String?
+  promptText      String   @db.Text
+  branchAId       String
+  branchBId       String
+  runAId          String?
+  runBId          String?
+  createdAt       DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@map("compare_groups")
+}
+
+model DependencyEdge {
+  id                String   @id @default(cuid())
+  projectId         String
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// "block" | "artifact" | "shot_dialogue" | "character_ref"
+  upstreamKind      String
+  upstreamId        String
+  upstreamVersion   String
+  /// "audio_take" | "video_take" | "lipsync_take" | "report_section"
+  downstreamKind    String
+  downstreamId      String
+  downstreamVersion String
+  stale             Boolean  @default(false)
+  staleReason       String?
+  updatedAt         DateTime @updatedAt
+
+  @@index([projectId, upstreamKind, upstreamId])
+  @@index([projectId, downstreamKind, downstreamId])
+  @@map("dependency_edges")
+}
+
+model MergeReview {
+  id                    String         @id @default(cuid())
+  projectId             String
+  project               Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceBranchId        String
+  targetBranchId        String
+  sourceHeadRevisionId  String
+  targetHeadRevisionId  String
+  commonBaseRevisionId  String?
+  diffItemsJson         Json           @default("[]")
+  dependencyImpactsJson Json           @default("[]")
+  /// "open" | "applied" | "stale" | "dismissed"
+  status                String         @default("open")
+  createdByUserId       String
+  expiresAt             DateTime?
+  createdAt             DateTime       @default(now())
+  receipts              MergeReceipt[]
+
+  @@index([projectId, targetBranchId, status])
+  @@map("merge_reviews")
+}
+
+model MergeReceipt {
+  id                       String       @id @default(cuid())
+  projectId                String
+  project                  Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  mergeReviewId            String?
+  mergeReview              MergeReview? @relation(fields: [mergeReviewId], references: [id], onDelete: SetNull)
+  idempotencyKey           String       @unique
+  sourceBranchId           String
+  targetBranchId           String
+  sourceHeadRevisionId     String?
+  baseRevisionId           String?
+  targetBeforeRevisionId   String?
+  targetAfterRevisionId    String
+  itemResolutionsJson      Json         @default("[]")
+  affectedDependenciesJson Json         @default("[]")
+  undoneByReceiptId        String?
+  actorUserId              String
+  createdAt                DateTime     @default(now())
+
+  @@index([projectId, targetBranchId, createdAt])
+  @@map("merge_receipts")
+}
+
+/// Atomic pre-authorization hold for paid LLM and media jobs. No cascade delete so audit survives.
+model ModelCreditHold {
+  id                   String    @id @default(cuid())
+  organizationId       String
+  userId               String
+  runId                String?
+  jobId                String?
+  operationKey         String    @unique
+  providerRequestId    String?
+  /// "subscription" | "byok" | "hosted_credits" | "local"
+  billingRoute         String    @default("hosted_credits")
+  heldMicros           BigInt
+  supplierCostMicros   BigInt?
+  customerChargeMicros BigInt?
+  settledMicros        BigInt?
+  /// "held" | "unknown_pending" | "reconciling" | "settled" | "refunded"
+  status               String    @default("held")
+  createdAt            DateTime  @default(now())
+  settledAt            DateTime?
+
+  @@index([organizationId, status, createdAt])
+  @@index([runId])
+  @@index([providerRequestId])
+  @@map("model_credit_holds")
+}
+
+/// Bounded expiring deduplication keys for routines, kept separate from personal memory.
+model RoutineDeliveryState {
+  id        String   @id @default(cuid())
+  routineId String
+  routine   Routine  @relation(fields: [routineId], references: [id], onDelete: Cascade)
+  itemKey   String
+  /// "reported" | "skipped"
+  outcome   String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([routineId, itemKey])
+  @@index([expiresAt])
+  @@map("routine_delivery_states")
+}
+
+// ==============================================================================
+// V2 Microdrama Studio Schema Shell (Real Tables, Ready for V2 Pipeline Code)
+// ==============================================================================
+
+model Episode {
+  id                String   @id @default(cuid())
+  projectId         String
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title             String
+  logline           String   @default("")
+  scriptArtifactId  String?
+  aspectRatio       String   @default("9:16")
+  targetDurationSec Int      @default(90)
+  /// "draft" | "storyboard" | "filming" | "review" | "exported"
+  status            String   @default("draft")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  scenes            Scene[]
+
+  @@index([projectId, createdAt])
+  @@map("episodes")
+}
+
+model CharacterRef {
+  id                       String   @id @default(cuid())
+  projectId                String
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  stableCode               String
+  name                     String
+  description              String   @default("")
+  voiceProvider            String?
+  voiceId                  String?
+  referenceArtifactIdsJson Json     @default("[]")
+  wardrobeNotes            String   @default("")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([projectId, stableCode])
+  @@map("character_refs")
+}
+
+model PropLocationRef {
+  id                       String   @id @default(cuid())
+  projectId                String
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// "prop" | "location"
+  kind                     String
+  stableCode               String
+  name                     String
+  description              String   @default("")
+  referenceArtifactIdsJson Json     @default("[]")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([projectId, stableCode])
+  @@map("prop_location_refs")
+}
+
+model Scene {
+  id          String   @id @default(cuid())
+  episodeId   String
+  episode     Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  sceneNumber Int
+  slugline    String
+  summary     String   @default("")
+  orderIndex  Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  shots       Shot[]
+
+  @@unique([episodeId, sceneNumber])
+  @@index([episodeId, orderIndex])
+  @@map("scenes")
+}
+
+model Shot {
+  id                   String     @id @default(cuid())
+  sceneId              String
+  scene                Scene      @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  stableShotCode       String
+  orderIndex           Int
+  intent               String     @default("")
+  cameraLens           String     @default("35mm Prime")
+  framing              String     @default("Medium")
+  durationSec          Float      @default(4)
+  dialogueText         String     @default("") @db.Text
+  dialogueVersion      Int        @default(1)
+  characterRefIdsJson  Json       @default("[]")
+  approvedVisualTakeId String?
+  approvedAudioTakeId  String?
+  staleFlagsJson       Json       @default("{}")
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  takes                ShotTake[]
+
+  @@unique([sceneId, stableShotCode])
+  @@index([sceneId, orderIndex])
+  @@map("shots")
+}
+
+model ShotTake {
+  id                String   @id @default(cuid())
+  shotId            String
+  shot              Shot     @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  branchId          String
+  branch            Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  /// "storyboard_frame" | "video" | "audio" | "lipsync"
+  kind              String
+  artifactId        String?
+  runId             String?
+  provider          String
+  modelId           String
+  inputSnapshotJson Json     @default("{}")
+  costMicros        BigInt?
+  /// "queued" | "rendering" | "ready" | "approved" | "stale" | "failed"
+  status            String   @default("queued")
+  createdAt         DateTime @default(now())
+
+  @@index([shotId, kind, status])
+  @@index([branchId, createdAt])
+  @@map("shot_takes")
+}
+
+/// Branch-local overrides for Microdrama Shot & CharacterRef fields so Main stays untouched until merge.
+model BranchEntityOverlay {
+  id             String   @id @default(cuid())
+  branchId       String
+  branch         Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  /// "shot" | "character_ref" | "prop_location_ref"
+  entityKind     String
+  entityId       String
+  overlayJson    Json     @default("{}")
+  approvedTakeId String?
+  updatedAt      DateTime @updatedAt
+
+  @@unique([branchId, entityKind, entityId])
+  @@index([entityKind, entityId])
+  @@map("branch_entity_overlays")
 }

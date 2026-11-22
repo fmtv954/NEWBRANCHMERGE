@@ -3,9 +3,13 @@ import { useLingui } from "@lingui/react/macro";
 import { useTimeout } from "@rakazo/chat-ui/hooks";
 import type {
   BotAvatarSet,
+  CompareGroup,
   ComputerReleaseReason,
   LoginFieldInput,
+  MergeReceipt,
+  MergeReview,
   MessageReaction,
+  Placement,
   ThreadMessage,
 } from "@rakazo/contracts";
 import type { ChildBotBlock, FoldedTranscript } from "@rakazo/core";
@@ -39,7 +43,18 @@ import {
   useState,
 } from "react";
 import { ActiveBotGlyph } from "../../../components/ai/CollaborationMarker";
+import { BranchSetupDialog } from "../../../components/branching/BranchSetupDialog";
+import {
+  CompareModelsCard,
+  InlineMergeReviewCard,
+  KeptItemCard,
+  MergeReceiptBanner,
+} from "../../../components/branching/InlineBranchCards";
 import { VoiceChatCard } from "../../../components/call/VoiceChatCard";
+import {
+  RunContinuityCard,
+  type RunContinuityState,
+} from "../../../components/runs/RunContinuityCard";
 import {
   isDetachedRange,
   lastSelectedText,
@@ -111,6 +126,19 @@ export const Transcript = memo(function Transcript({
   onReleaseComputer,
   onOpenImportSetup,
   rpc,
+  projectId,
+  branchId,
+  placements,
+  activeMergeReview,
+  compareGroups,
+  mergeReceipts,
+  runContinuity,
+  onBranchCreated,
+  reviewBlocksOpen,
+  onInstantBranch,
+  onReorderPlacements,
+  onRemovePlacement,
+  onSaveBlockOrder,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   scrollRequest: { messageId: string; nonce: number } | null;
@@ -170,8 +198,29 @@ export const Transcript = memo(function Transcript({
   ) => Promise<void>;
   onOpenImportSetup?: (target: ImportSetupTarget) => void;
   rpc: ReturnType<typeof createSpaceRpc>;
+  projectId?: string | null;
+  branchId?: string | null;
+  placements?: readonly Placement[];
+  activeMergeReview?: MergeReview | null;
+  compareGroups?: readonly CompareGroup[];
+  mergeReceipts?: readonly MergeReceipt[];
+  runContinuity?: RunContinuityState | null;
+  onBranchCreated?: (branchId: string) => void;
+  reviewBlocksOpen?: boolean;
+  onInstantBranch?: (input: {
+    messageId: string;
+    quoteText?: string;
+    utf16Start?: number;
+    utf16End?: number;
+  }) => void;
+  onReorderPlacements?: (orderedIds: string[]) => Promise<void>;
+  onRemovePlacement?: (placementId: string) => Promise<void>;
+  onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
 }) {
   const { t } = useLingui();
+  const [branchSetupOpen, setBranchSetupOpen] = useState(false);
+  const [branchSourceMessageId, setBranchSourceMessageId] = useState<string | null>(null);
+  const [draggedPlacementId, setDraggedPlacementId] = useState<string | null>(null);
   const [atEnd, setAtEnd] = useState(true);
   const following = useRef(true);
   const jumpScrolling = useRef(false);
@@ -701,6 +750,21 @@ export const Transcript = memo(function Transcript({
                       onReleaseComputer={onReleaseComputer}
                       onOpenImportSetup={onOpenImportSetup}
                       rpc={rpc}
+                      projectId={projectId}
+                      branchId={branchId}
+                      onBranch={
+                        onInstantBranch
+                          ? (msg) => onInstantBranch({ messageId: msg.id })
+                          : undefined
+                      }
+                      reviewBlocksActive={reviewBlocksOpen}
+                      onSaveBlockOrder={onSaveBlockOrder}
+                      onBranchBlockText={
+                        onInstantBranch
+                          ? (msg, blockText) =>
+                              onInstantBranch({ messageId: msg.id, quoteText: blockText })
+                          : undefined
+                      }
                       showToolActivity={showToolActivity}
                       onReply={onReply}
                       onMarkUnread={onMarkUnread}
@@ -737,8 +801,189 @@ export const Transcript = memo(function Transcript({
         ) ? (
           <ActiveBotGlyph bots={workingBots} label={workingLabel} />
         ) : null}
+        {runContinuity ? <RunContinuityCard state={runContinuity} /> : null}
+        {placements && placements.length > 0 ? (
+          <div className="space-y-2.5 pt-2">
+            {placements.map((placement, idx) => (
+              <KeptItemCard
+                key={placement.id}
+                placement={placement}
+                sourceBranchName="Branch"
+                draggable={Boolean(onReorderPlacements)}
+                onDragStart={() => setDraggedPlacementId(placement.id)}
+                onDragOver={(e) => {
+                  if (draggedPlacementId && draggedPlacementId !== placement.id) {
+                    e.preventDefault();
+                  }
+                }}
+                onDrop={() => {
+                  if (!onReorderPlacements || !draggedPlacementId || draggedPlacementId === placement.id) {
+                    return;
+                  }
+                  const ids = placements.map((p) => p.id);
+                  const fromIdx = ids.indexOf(draggedPlacementId);
+                  const toIdx = ids.indexOf(placement.id);
+                  if (fromIdx < 0 || toIdx < 0) return;
+                  const [moved] = ids.splice(fromIdx, 1);
+                  if (moved) ids.splice(toIdx, 0, moved);
+                  setDraggedPlacementId(null);
+                  void onReorderPlacements(ids);
+                }}
+                canMoveUp={idx > 0}
+                canMoveDown={idx < placements.length - 1}
+                onMoveUp={
+                  onReorderPlacements && idx > 0
+                    ? () => {
+                        const next = placements.map((p) => p.id);
+                        const [item] = next.splice(idx, 1);
+                        if (item) next.splice(idx - 1, 0, item);
+                        void onReorderPlacements(next);
+                      }
+                    : undefined
+                }
+                onMoveDown={
+                  onReorderPlacements && idx < placements.length - 1
+                    ? () => {
+                        const next = placements.map((p) => p.id);
+                        const [item] = next.splice(idx, 1);
+                        if (item) next.splice(idx + 1, 0, item);
+                        void onReorderPlacements(next);
+                      }
+                    : undefined
+                }
+                onRemove={onRemovePlacement ? (id) => void onRemovePlacement(id) : undefined}
+                onViewSource={(_srcBranchId, srcMessageId) => {
+                  if (srcMessageId) onJumpToMessage(srcMessageId);
+                }}
+                onMove={() => undefined}
+                onToggleNextMessage={() => undefined}
+              />
+            ))}
+          </div>
+        ) : null}
+        {compareGroups?.map((group) => (
+          <CompareModelsCard
+            key={group.id}
+            promptText={group.promptText}
+            branchA={{
+              branchId: group.branchAId,
+              modelLabel: "Model A",
+              costEstimate: "—",
+              previewText: "",
+            }}
+            branchB={{
+              branchId: group.branchBId,
+              modelLabel: "Model B",
+              costEstimate: "—",
+              previewText: "",
+            }}
+            onKeepResult={async (chosenBranchId, previewText) => {
+              if (!projectId || !branchId) return;
+              await rpc.placements.keepInMain({
+                projectId,
+                sourceBranchId: chosenBranchId,
+                targetBranchId: branchId,
+                excerptText: previewText,
+                label: "Compared result",
+                clientNonce: crypto.randomUUID(),
+              });
+              await onRefresh();
+            }}
+          />
+        ))}
+        {activeMergeReview ? (
+          <InlineMergeReviewCard
+            review={activeMergeReview}
+            sourceBranchName="Branch"
+            onDefer={() => undefined}
+            onApply={async (resolutions) => {
+              await rpc.merges.apply({
+                mergeReviewId: activeMergeReview.id,
+                expectedTargetHeadRevisionId: activeMergeReview.targetHeadRevisionId,
+                idempotencyKey: crypto.randomUUID(),
+                resolutions,
+              });
+              await onRefresh();
+            }}
+          />
+        ) : null}
+        {mergeReceipts?.map((receipt) => (
+          <MergeReceiptBanner
+            key={receipt.id}
+            acceptedCount={receipt.acceptedCount}
+            onUndo={async () => {
+              await rpc.merges.undo({
+                mergeReceiptId: receipt.id,
+                idempotencyKey: crypto.randomUUID(),
+              });
+              await onRefresh();
+            }}
+          />
+        ))}
+        {/* Extra bottom clearance so injected blocks, merge reviews, and receipts never hide behind the floating Composer */}
+        <div className="h-24 shrink-0" aria-hidden="true" />
       </div>
-      {quoteDraft ? <QuoteSelectionButton range={quoteDraft.range} onQuote={applyQuote} /> : null}
+      {quoteDraft ? (
+        <QuoteSelectionButton
+          range={quoteDraft.range}
+          onQuote={applyQuote}
+          onBranch={
+            onInstantBranch
+              ? () => {
+                  const quoteText = quoteDraft.range.toString().trim();
+                  const fullText = quoteDraft.message.blocks
+                    .filter((b) => b.kind === "text")
+                    .map((b) => ("text" in b ? b.text : ""))
+                    .join("\n\n");
+                  const idx = quoteText ? fullText.indexOf(quoteText) : -1;
+                  window.getSelection()?.removeAllRanges();
+                  setQuoteDraft(null);
+                  onInstantBranch({
+                    messageId: quoteDraft.message.id,
+                    quoteText: quoteText || undefined,
+                    utf16Start: idx >= 0 ? idx : undefined,
+                    utf16End: idx >= 0 ? idx + quoteText.length : undefined,
+                  });
+                }
+              : undefined
+          }
+        />
+      ) : null}
+      <BranchSetupDialog
+        open={branchSetupOpen}
+        onOpenChange={setBranchSetupOpen}
+        inheritedMessageCount={messages.length}
+        pinnedRefCount={placements?.length ?? 0}
+        onOpenBranch={async (input) => {
+          if (!projectId || !branchId) return;
+          const created = await rpc.branches.create({
+            projectId,
+            sourceBranchId: branchId,
+            name: input.name,
+            sourceMessageId: branchSourceMessageId ?? undefined,
+            contextMode: input.contextMode,
+            defaultModelProvider: input.modelProvider,
+            defaultModelId: input.modelId,
+          });
+          setBranchSetupOpen(false);
+          onBranchCreated?.(created.id);
+        }}
+        onCompareModels={async (input) => {
+          if (!projectId || !branchId) return;
+          await rpc.branches.compareModels({
+            projectId,
+            sourceBranchId: branchId,
+            sourceMessageId: branchSourceMessageId ?? undefined,
+            contextMode: input.contextMode,
+            promptText: "Compare models on this branch",
+            modelA: input.modelA,
+            modelB: input.modelB,
+            clientNonce: crypto.randomUUID(),
+          });
+          setBranchSetupOpen(false);
+          await onRefresh();
+        }}
+      />
       <Button
         ref={jumpButtonRef}
         variant="floating"

@@ -194,6 +194,8 @@ function replyBlockText(block: MessageBlock): string {
       return block.name || blocksToAgentHistoryText([block]);
     case "delivery":
       return "";
+    case "a2ui_surface":
+      return block.title ?? block.surfaceId;
   }
 }
 

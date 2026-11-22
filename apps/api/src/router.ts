@@ -43,6 +43,7 @@ import type { VoiceDeps } from "./calls/voice.js";
 import { meetingCalendarRoutes } from "./meetings/calendar/calendar-routes.js";
 import type { createMeetingAnswers } from "./meetings/meeting-answers.js";
 import { meetingRoutes } from "./meetings/meeting-routes.js";
+import { a2uiRoutes } from "./routes/a2ui.js";
 import { accountRoutes } from "./routes/account.js";
 import { availabilityRoutes } from "./routes/availability.js";
 import { boardsRoutes } from "./routes/boards.js";
@@ -53,14 +54,17 @@ import { computerProviderRoutes } from "./routes/computer-provider.js";
 import { connectionsRoutes } from "./routes/connections.js";
 import { contentRoutes } from "./routes/content.js";
 import { createRouterContext } from "./routes/context.js";
+import { dashboardsRoutes } from "./routes/dashboards.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { memoryRoutes } from "./routes/memory.js";
 import { messagingRoutes } from "./routes/messaging.js";
+import { microdramaRoutes } from "./routes/microdrama.js";
 import { modelsRoutes } from "./routes/models.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
 import { organizationsRoutes } from "./routes/organizations.js";
 import { pagesRoutes } from "./routes/pages.js";
 import { paymentWalletRoutes } from "./routes/payment-wallet.js";
+import { projectsRoutes } from "./routes/projects.js";
 import { routinesRoutes } from "./routes/routines.js";
 import { spacesRoutes } from "./routes/spaces.js";
 import { spendingLimitRoutes } from "./routes/spending-limit.js";
@@ -188,6 +192,10 @@ export function createRouter(deps: RouterDeps) {
     ...modelsRoutes(ctx),
     ...botsRoutes(ctx),
     ...threadsRoutes(ctx),
+    ...projectsRoutes(ctx),
+    ...microdramaRoutes(ctx),
+    ...a2uiRoutes(ctx),
+    ...dashboardsRoutes(ctx),
     ...computerRoutes(ctx),
     ...computerProviderRoutes(ctx),
     ...memoryRoutes(ctx),

@@ -1,0 +1,40 @@
+# Local development infrastructure for CLONE (PostgreSQL 18 + MinIO S3-compatible object storage)
+# Usage:
+#   cp .env.local.example .env.local
+#   docker compose --env-file .env.local -f docker-compose.local.yml up -d
+#
+# Note: Matches Rakazo's host-side dev ports (127.0.0.1:5433 for Postgres) and S3 config.
+
+name: clone-local
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rakazo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clone_local_pg_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-rakazo}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - clone_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rakazo} -d ${POSTGRES_DB:-rakazo}"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  s3:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: "server -s3 -s3.port=9000 -dir=/data"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - clone_minio_data:/data
+
+volumes:
+  clone_pgdata:
+  clone_minio_data:

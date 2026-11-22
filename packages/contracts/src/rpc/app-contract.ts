@@ -3,16 +3,20 @@ import type {
   InferContractRouterInputs,
   InferContractRouterOutputs,
 } from "@orpc/contract";
+import { a2uiRpc } from "../a2ui/a2ui-rpc.js";
 import { accountRpc } from "../account/account-rpc.js";
 import { artifactsRpc } from "../artifacts/artifacts-rpc.js";
 import { billingRpc } from "../billing/billing-rpc.js";
 import { botsRpc } from "../bots/bots-rpc.js";
 import { serverRpc } from "../clients/server-rpc.js";
 import { computersRpc } from "../computers/computers-rpc.js";
+import { dashboardsRpc } from "../dashboards/dashboards-rpc.js";
 import { integrationsRpc } from "../integrations/integrations-rpc.js";
 import { meetingCalendarRpc } from "../meetings/calendar.js";
 import { meetingsRpc } from "../meetings/meetings.js";
+import { microdramaRpc } from "../microdrama/microdrama-rpc.js";
 import { modelsRpc } from "../models/models-rpc.js";
+import { projectsRpc } from "../projects/projects-rpc.js";
 import { routinesRpc } from "../routines/routines-rpc.js";
 import { runsRpc } from "../runs/runs-rpc.js";
 import { skillsRpc } from "../skills/skills-rpc.js";
@@ -28,6 +32,10 @@ export const appContract = {
   ...modelsRpc,
   ...botsRpc,
   ...threadsRpc,
+  ...projectsRpc,
+  ...microdramaRpc,
+  ...a2uiRpc,
+  ...dashboardsRpc,
   ...meetingsRpc,
   ...meetingCalendarRpc,
   ...routinesRpc,

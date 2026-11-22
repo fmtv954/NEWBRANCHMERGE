@@ -15,7 +15,8 @@ import {
   PopoverTrigger,
   SectionHeading,
 } from "@rakazo/ui-web";
-import { ChevronRight, Plus } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronRight, KeyRound, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import type { ModelCredential } from "../../lib/models/model-auth";
@@ -76,7 +77,84 @@ export function ProvidersSection({
         </li>
       </ul>
       {panel}
+      <CloneQuickProviders providers={providers} disabled={disabled} onAdd={onAdd} />
     </section>
+  );
+}
+
+function CloneQuickProviders({
+  providers,
+  disabled,
+  onAdd,
+}: {
+  providers: ConnectableProvider[];
+  disabled?: boolean;
+  onAdd: (provider: ConnectableProvider) => void;
+}) {
+  const queries = useSpaceQueries();
+  const statusList = useQuery(queries.media.providerStatus.queryOptions()).data;
+  if (!statusList?.length) return null;
+
+  function pickProvider(providerId: string) {
+    const exact = providers.find((p) => p.id.toLowerCase() === providerId.toLowerCase());
+    if (exact) {
+      onAdd(exact);
+      return;
+    }
+    const compat = providers.find((p) => p.id === "openai-compatible");
+    if (compat) onAdd(compat);
+  }
+
+  return (
+    <div className="mt-5" data-testid="clone-quick-providers">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-label font-medium text-muted-foreground">
+          CLONE Provider Endpoints & Server Keys
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          Click Connect to add or override a personal API key
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {statusList.map((item) => (
+          <div
+            key={item.provider}
+            className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card/60 px-3 py-2.5"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-body-sm font-medium text-foreground">
+                  {item.label}
+                </span>
+                <span
+                  className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                    item.hasEnvKey
+                      ? "bg-emerald-500/15 text-emerald-400"
+                      : "bg-amber-500/15 text-amber-400"
+                  }`}
+                >
+                  {item.hasEnvKey ? "Server Key Active" : "Needs Key"}
+                </span>
+              </div>
+              <div className="truncate font-mono text-[10px] text-muted-foreground">
+                {item.baseUrl}
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled}
+              onClick={() => pickProvider(item.provider)}
+              className="h-7 shrink-0 gap-1 px-2 text-xs"
+            >
+              <KeyRound className="size-3" />
+              <span>{item.hasEnvKey ? "Override" : "Connect"}</span>
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

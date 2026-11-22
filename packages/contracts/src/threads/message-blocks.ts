@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { A2uiSurfaceBlockSchema } from "../a2ui/a2ui.js";
 import { PAGE_TITLE_MAX_LENGTH } from "../artifacts/pages.js";
 import {
   botSecretDestinationSchema,
@@ -382,6 +383,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     /** Links in a bot-started chain; absent when a person started it. */
     hop: z.number().int().nonnegative().optional(),
   }),
+  A2uiSurfaceBlockSchema,
 ]);
 export type MessageBlock = z.infer<typeof MessageBlock>;
 

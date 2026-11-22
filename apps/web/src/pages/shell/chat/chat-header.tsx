@@ -1,8 +1,8 @@
 import { useLingui } from "@lingui/react/macro";
-import type { Bot, Group, ThreadSnapshot } from "@rakazo/contracts";
+import type { Bot, Branch, Group, ThreadSnapshot } from "@rakazo/contracts";
 import { MEETING_CALENDAR_RETURN_PARAM } from "@rakazo/contracts";
 import { BotAvatar, Button, GroupAvatar } from "@rakazo/ui-web";
-import { Gift, Menu, Phone, Video } from "lucide-react";
+import { Columns2, Gift, GitBranch, GitMerge, Layers, Menu, Phone, Video } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useBilling } from "../../../components/billing/SubscriptionGate";
@@ -10,6 +10,7 @@ import { IconTooltip } from "../../../components/IconTooltip";
 import { InviteDialog } from "../../../components/spaces/InviteDialog";
 import { WindowChrome } from "../../../components/WindowChrome";
 import { desktopBridge, windowChromeKind } from "../../../lib/platform/desktop";
+import { BranchSwitcher } from "./branch-switcher";
 
 const MeetingsDialog = lazy(() => import("../meetings/meetings-dialog"));
 
@@ -27,6 +28,17 @@ export function ChatHeader({
   onOpenNavigation,
   onTogglePanel,
   onCall,
+  branches,
+  activeBranchId,
+  onSelectBranch,
+  onCreateBranch,
+  onMergeBranch,
+  splitViewOpen,
+  onToggleSplitView,
+  reviewBlocksOpen,
+  onToggleReviewBlocks,
+  showArchivedBranches,
+  onToggleShowArchivedBranches,
 }: {
   inGroup: boolean;
   active: Bot | undefined;
@@ -41,6 +53,17 @@ export function ChatHeader({
   onOpenNavigation: () => void;
   onTogglePanel: () => void;
   onCall: (bot: Bot) => void;
+  branches?: readonly Branch[];
+  activeBranchId?: string | null;
+  onSelectBranch?: (branchId: string) => void;
+  onCreateBranch?: () => void;
+  onMergeBranch?: () => void;
+  splitViewOpen?: boolean;
+  onToggleSplitView?: () => void;
+  reviewBlocksOpen?: boolean;
+  onToggleReviewBlocks?: () => void;
+  showArchivedBranches?: boolean;
+  onToggleShowArchivedBranches?: () => void;
 }) {
   const { t } = useLingui();
   const referral = useBilling().status?.referral;
@@ -48,7 +71,7 @@ export function ChatHeader({
   const macChrome = windowChromeKind(desktopBridge()) === "darwin";
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid grid-cols-[1fr_minmax(0,auto)_1fr] items-center gap-2 px-3 py-[13px] md:px-[22px] [&_button]:pointer-events-auto">
-      <div className="flex items-center">
+      <div className="flex items-center gap-2">
         {macChrome ? <WindowChrome className="md:hidden" /> : null}
         <Button
           variant="floating"
@@ -59,6 +82,76 @@ export function ChatHeader({
         >
           <Menu strokeWidth={1.7} className="size-[19px]" />
         </Button>
+        {branches && branches.length > 0 && onSelectBranch ? (
+          <BranchSwitcher
+            branches={branches}
+            activeBranchId={activeBranchId ?? null}
+            onSelectBranch={onSelectBranch}
+            onCreateBranch={onCreateBranch}
+            showArchived={showArchivedBranches}
+            onToggleShowArchived={onToggleShowArchivedBranches}
+          />
+        ) : onCreateBranch ? (
+          <Button
+            type="button"
+            variant="floating"
+            size="sm"
+            onClick={onCreateBranch}
+            className="app-no-drag h-7 gap-1.5 px-2.5 text-label font-medium"
+          >
+            <GitBranch className="size-3.5 text-success" />
+            <span>Main</span>
+          </Button>
+        ) : null}
+        {onMergeBranch &&
+        activeBranchId &&
+        branches?.some((b) => b.id === activeBranchId && !b.isMain) ? (
+          <Button
+            type="button"
+            variant="floating"
+            size="sm"
+            onClick={onMergeBranch}
+            className="app-no-drag h-7 gap-1 px-2.5 text-label font-medium text-success"
+          >
+            <GitMerge className="size-3.5" />
+            <span className="hidden sm:inline">Merge</span>
+          </Button>
+        ) : null}
+        {onToggleSplitView ? (
+          <IconTooltip label="Split View (Main | Branch)">
+            <Button
+              type="button"
+              variant="floating"
+              size="icon-sm"
+              aria-label="Split View"
+              aria-pressed={Boolean(splitViewOpen)}
+              data-active={splitViewOpen ? "" : undefined}
+              onClick={onToggleSplitView}
+              className="app-no-drag h-7 w-7"
+            >
+              <Columns2 className="size-3.5" />
+            </Button>
+          </IconTooltip>
+        ) : null}
+        {onToggleReviewBlocks ? (
+          <IconTooltip label="Block Mode: drag & reorder paragraphs in Main">
+            <Button
+              type="button"
+              variant="floating"
+              size="sm"
+              aria-label="Block Mode"
+              aria-pressed={Boolean(reviewBlocksOpen)}
+              data-active={reviewBlocksOpen ? "" : undefined}
+              onClick={onToggleReviewBlocks}
+              className={`app-no-drag h-7 gap-1 px-2 text-label font-medium ${
+                reviewBlocksOpen ? "text-success" : ""
+              }`}
+            >
+              <Layers className="size-3.5" />
+              <span className="hidden lg:inline">Blocks</span>
+            </Button>
+          </IconTooltip>
+        ) : null}
       </div>
       <Button
         variant="floating"

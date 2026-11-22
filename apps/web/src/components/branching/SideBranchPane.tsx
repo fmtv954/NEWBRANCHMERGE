@@ -1,0 +1,441 @@
+import {
+  type Bot,
+  type Branch,
+  type BranchContextMode,
+  CLONE_SYSTEM_PERSONAS,
+  type ModelPersona,
+} from "@rakazo/contracts";
+import { Badge, Button, Card } from "@rakazo/ui-web";
+import {
+  ArrowDownToLine,
+  ArrowUp,
+  BookmarkPlus,
+  Check,
+  GitBranch,
+  GitMerge,
+  Loader2,
+  Pencil,
+  Sparkles,
+  X,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useUnifiedModels } from "../../lib/models/use-unified-models";
+import type { createSpaceRpc } from "../../lib/query/rpc";
+import { PersonaPicker } from "./PersonaPicker";
+import { SideBranchModelPicker } from "./SideBranchModelPicker";
+
+export interface SideBranchMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  modelLabel?: string;
+  createdAt?: string;
+}
+
+/**
+ * Right-hand Split-Pane Side Branch (isolated branch.threadId in PostgreSQL):
+ * - Durable conversation memory loaded via `rpc.branches.messages`
+ * - Isolated LLM replies via `rpc.branches.send` (never pollutes Main!)
+ * - Unified Frontier | Uncensored model picker (`SideBranchModelPicker`)
+ * - Inline-editable branch name persisted via `rpc.branches.rename`
+ * - 1-click Context toggle (`Full chat + focus` vs `Focus only`)
+ * - 1-click quick actions (`Insert at spot`, `Replace spot`, `Drop as Block`) + full `Merge` modal
+ */
+export function SideBranchPane({
+  rpc,
+  projectId,
+  branch,
+  activeBot,
+  initialFocusQuote,
+  onOpenModelSettings,
+  onRenameBranch,
+  onInjectIntoMain,
+  onOpenMergeReview,
+  onClose,
+}: {
+  rpc: ReturnType<typeof createSpaceRpc>;
+  projectId: string;
+  branch: Branch;
+  activeBot?: Bot;
+  initialFocusQuote?: string | null;
+  onOpenModelSettings?: () => void;
+  onRenameBranch?: (name: string) => void;
+  onInjectIntoMain: (input: {
+    mode: "insert_spot" | "replace_spot" | "drop_block";
+    text: string;
+    sourceBranchId: string;
+  }) => Promise<void>;
+  onOpenMergeReview: (selectedText?: string) => void;
+  onClose: () => void;
+}) {
+  const { defaultMainModelKey } = useUnifiedModels(activeBot);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(branch.name);
+  const [contextMode, setContextMode] = useState<BranchContextMode>(
+    branch.forkOrigin?.contextMode ?? "through_message",
+  );
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    if (activeBot?.modelProvider && activeBot?.modelId) {
+      return `${activeBot.modelProvider}:${activeBot.modelId}`;
+    }
+    if (branch.defaultModelProvider && branch.defaultModelId) {
+      return `${branch.defaultModelProvider}:${branch.defaultModelId}`;
+    }
+    return defaultMainModelKey;
+  });
+  const [activePersona, setActivePersona] = useState<ModelPersona>(CLONE_SYSTEM_PERSONAS[0]!);
+  const [messages, setMessages] = useState<SideBranchMessage[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [injectingKey, setInjectingKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const scrollEndRef = useRef<HTMLDivElement>(null);
+
+  // Keep Side Chat defaulted to Main's active model when opening a fresh branch.
+  useEffect(() => {
+    if (defaultMainModelKey) {
+      setSelectedModel(defaultMainModelKey);
+    }
+  }, [branch.id, defaultMainModelKey]);
+
+  const focusQuote = initialFocusQuote ?? branch.forkOrigin?.selectionRange?.quoteText ?? null;
+
+  // Load persisted side-branch messages whenever switching or reopening a branch.
+  useEffect(() => {
+    let cancelled = false;
+    setNameDraft(branch.name);
+    setContextMode(branch.forkOrigin?.contextMode ?? "through_message");
+    setLoadingHistory(true);
+    setError(null);
+    rpc.branches
+      .messages({ branchId: branch.id })
+      .then((res) => {
+        if (!cancelled) setMessages(res.messages);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setMessages([]);
+          setError(err instanceof Error ? err.message : "Could not load branch history");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingHistory(false);
+          inputRef.current?.focus();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [branch.id, branch.name, branch.forkOrigin?.contextMode, rpc]);
+
+  useEffect(() => {
+    scrollEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length, sending]);
+
+  async function commitRename() {
+    setEditingName(false);
+    const trimmed = nameDraft.trim();
+    if (!trimmed || trimmed === branch.name) return;
+    onRenameBranch?.(trimmed);
+    try {
+      await rpc.branches.rename({ branchId: branch.id, name: trimmed });
+    } catch {
+      // ignore transient rename failure
+    }
+  }
+
+  async function handleSend() {
+    const prompt = draft.trim();
+    if (!prompt || sending) return;
+    setDraft("");
+    setError(null);
+    const tempId = `temp_u_${Date.now()}`;
+    setMessages((prev) => [...prev, { id: tempId, role: "user", text: prompt }]);
+    setSending(true);
+    try {
+      const [provider = "openai", modelId = "gpt-4o-mini"] = (selectedModel || defaultMainModelKey).split(":");
+      const res = await rpc.branches.send({
+        branchId: branch.id,
+        text: prompt,
+        contextMode,
+        provider,
+        modelId,
+        focusQuote: focusQuote ?? undefined,
+        personaId: activePersona.id !== "default" ? activePersona.id : undefined,
+        personaPrompt: activePersona.systemPrompt || undefined,
+      });
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempId),
+        res.userMessage,
+        res.assistantMessage,
+      ]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to get branch reply");
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  const latestAssistantText =
+    [...messages].reverse().find((m) => m.role === "assistant")?.text ?? "";
+
+  return (
+    <aside
+      data-testid="side-branch-pane"
+      className="flex h-full w-full flex-col border-l border-border bg-background/95 md:w-[46%] md:min-w-[360px] md:max-w-[540px]"
+    >
+      {/* Header: Inline-editable branch name + Context toggle + Merge + Close */}
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3.5 py-2.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <GitBranch className="size-4 shrink-0 text-success" />
+          {editingName ? (
+            <input
+              type="text"
+              value={nameDraft}
+              autoFocus
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => void commitRename()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitRename();
+              }}
+              className="h-6 w-44 rounded border border-ring bg-background px-1.5 text-xs font-medium text-foreground outline-none"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setEditingName(true)}
+              title="Click to rename branch"
+              className="group flex min-w-0 items-center gap-1 text-left text-xs font-semibold text-foreground hover:text-success"
+            >
+              <span className="truncate">{nameDraft}</span>
+              <Pencil className="size-3 shrink-0 opacity-0 group-hover:opacity-70" />
+            </button>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() =>
+              setContextMode((m) => (m === "through_message" ? "only_selection" : "through_message"))
+            }
+            title="Switch branch context scope"
+            className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-muted/70 px-2 text-[10px] font-medium text-foreground hover:bg-muted"
+          >
+            <Sparkles className="size-2.5 text-sky-400" />
+            <span>{contextMode === "only_selection" ? "Focus only" : "Full chat + focus"}</span>
+          </button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onOpenMergeReview(latestAssistantText)}
+            className="h-6 gap-1 px-2 text-[11px] text-success"
+          >
+            <GitMerge className="size-3" />
+            <span>Merge</span>
+          </Button>
+
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close side branch"
+            onClick={onClose}
+            className="size-6"
+          >
+            <X className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Pinned Focus Quote from Main */}
+      {focusQuote ? (
+        <div className="border-b border-border/70 bg-muted/40 px-3.5 py-2 text-xs">
+          <div className="mb-0.5 flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <span>Branched Focus from Main</span>
+            <Badge variant="outline" className="h-4 px-1 text-[9px]">
+              {projectId.slice(0, 6)}
+            </Badge>
+          </div>
+          <p className="line-clamp-3 border-l-2 border-success/60 pl-2 text-foreground/90">
+            “{focusQuote}”
+          </p>
+        </div>
+      ) : null}
+
+      {/* Side-Branch Transcript (Persisted on branch.threadId) */}
+      <div className="rk-scroll flex-1 space-y-3 overflow-y-auto p-3.5">
+        {loadingHistory ? (
+          <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" />
+            <span>Loading branch memory…</span>
+          </div>
+        ) : messages.length === 0 ? (
+          <Card className="border-dashed border-border bg-card/40 p-3 text-xs text-muted-foreground">
+            Ask a follow-up question in this isolated side thread (Main stays untouched). When you
+            like an answer, click <strong>Insert at spot</strong>, <strong>Replace spot</strong>,{" "}
+            <strong>Drop as Block</strong>, or open the full <strong>Merge</strong> modal.
+          </Card>
+        ) : (
+          messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`flex flex-col gap-1.5 ${msg.role === "user" ? "items-end" : "items-start"}`}
+            >
+              <div
+                className={`max-w-[92%] rounded-2xl px-3.5 py-2.5 text-xs ${
+                  msg.role === "user"
+                    ? "bg-primary text-primary-foreground"
+                    : "border border-border bg-card text-foreground"
+                }`}
+              >
+                {msg.modelLabel ? (
+                  <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+                    {msg.modelLabel}
+                  </div>
+                ) : null}
+                <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+              </div>
+
+              {msg.role === "assistant" ? (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={injectingKey === `${msg.id}:insert`}
+                    onClick={async () => {
+                      setInjectingKey(`${msg.id}:insert`);
+                      try {
+                        await onInjectIntoMain({
+                          mode: "insert_spot",
+                          text: msg.text,
+                          sourceBranchId: branch.id,
+                        });
+                      } finally {
+                        setInjectingKey(null);
+                      }
+                    }}
+                    className="h-6 gap-1 px-2 text-[10px] text-success"
+                  >
+                    <ArrowDownToLine className="size-3" />
+                    <span>Insert at spot</span>
+                  </Button>
+
+                  {focusQuote ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={injectingKey === `${msg.id}:replace`}
+                      onClick={async () => {
+                        setInjectingKey(`${msg.id}:replace`);
+                        try {
+                          await onInjectIntoMain({
+                            mode: "replace_spot",
+                            text: msg.text,
+                            sourceBranchId: branch.id,
+                          });
+                        } finally {
+                          setInjectingKey(null);
+                        }
+                      }}
+                      className="h-6 gap-1 px-2 text-[10px] text-sky-400"
+                    >
+                      <Check className="size-3" />
+                      <span>Replace spot</span>
+                    </Button>
+                  ) : null}
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={injectingKey === `${msg.id}:block`}
+                    onClick={async () => {
+                      setInjectingKey(`${msg.id}:block`);
+                      try {
+                        await onInjectIntoMain({
+                          mode: "drop_block",
+                          text: msg.text,
+                          sourceBranchId: branch.id,
+                        });
+                      } finally {
+                        setInjectingKey(null);
+                      }
+                    }}
+                    className="h-6 gap-1 px-2 text-[10px]"
+                  >
+                    <BookmarkPlus className="size-3" />
+                    <span>Drop as Block</span>
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ))
+        )}
+
+        {sending ? (
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin text-success" />
+            <span>Thinking on side branch…</span>
+          </div>
+        ) : null}
+        {error ? <p className="text-xs text-destructive">{error}</p> : null}
+        <div ref={scrollEndRef} />
+      </div>
+
+      {/* Embedded Unified Model Picker + Persona Picker + Side-Branch Composer */}
+      <div className="border-t border-border bg-card/40 p-3">
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+          <SideBranchModelPicker
+            activeBot={activeBot}
+            value={selectedModel}
+            onChange={setSelectedModel}
+            onManageKeys={onOpenModelSettings}
+          />
+          <PersonaPicker
+            selectedPersonaId={activePersona.id}
+            onSelectPersona={setActivePersona}
+          />
+          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+            Isolated side thread
+          </span>
+        </div>
+
+        <div className="flex items-end gap-2 rounded-xl border border-border bg-background px-2.5 py-2 focus-within:border-ring">
+          <textarea
+            ref={inputRef}
+            rows={2}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleSend();
+              }
+            }}
+            placeholder="Ask about this selection on the side..."
+            className="max-h-28 flex-1 resize-none bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          />
+          <Button
+            type="button"
+            size="icon-sm"
+            disabled={!draft.trim() || sending}
+            onClick={() => void handleSend()}
+            aria-label="Send side-branch message"
+            className="size-7 shrink-0 rounded-full"
+          >
+            {sending ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+          </Button>
+        </div>
+      </div>
+    </aside>
+  );
+}

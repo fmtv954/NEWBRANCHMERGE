@@ -1,6 +1,6 @@
 import { useLingui } from "@lingui/react/macro";
 import { Button, cn } from "@rakazo/ui-web";
-import { TextQuote } from "lucide-react";
+import { BookmarkPlus, Copy, GitBranch, TextQuote } from "lucide-react";
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { isDetachedRange } from "../../../lib/chat/quote-selection";
@@ -11,12 +11,18 @@ import { isApplePlatform, quoteShortcutLabel } from "../shell-shortcuts";
 export const QuoteSelectionButton = memo(function QuoteSelectionButton({
   range,
   onQuote,
+  onBranch,
+  onKeepInMain,
+  inBranch = false,
 }: {
   range: Range;
   onQuote: () => void;
+  onBranch?: () => void;
+  onKeepInMain?: () => void;
+  inBranch?: boolean;
 }) {
   const { t } = useLingui();
-  const buttonRef = useRef<HTMLButtonElement>(null);
+  const buttonRef = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<{
     top: number;
     left: number;
@@ -56,25 +62,68 @@ export const QuoteSelectionButton = memo(function QuoteSelectionButton({
         placement?.above === false ? "translate-y-0" : "-translate-y-full",
       )}
     >
-      <Button
+      <div
         ref={buttonRef}
-        variant="floating"
-        size="sm"
-        data-testid="quote-selection"
+        role="toolbar"
+        aria-label={t`Selection actions`}
         onMouseDown={(event) => {
-          // Keep the highlight alive until the click commits the quote.
+          // Keep the highlight alive until the click commits the action.
           event.preventDefault();
           event.stopPropagation();
         }}
-        onClick={onQuote}
-        className="px-3 shadow-md"
+        className="flex items-center gap-1 rounded-xl border border-glass-stroke bg-popover/95 p-1 shadow-md backdrop-blur-md"
       >
-        <TextQuote strokeWidth={2} />
-        {t`Reply`}
-        <span className="hidden text-label text-muted-foreground pointer-fine:inline">
-          {quoteShortcutLabel({ desktop: Boolean(desktopBridge()), apple: isApplePlatform() })}
-        </span>
-      </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-testid="quote-selection"
+          onClick={onQuote}
+          className="h-7 px-2.5 text-label"
+        >
+          <TextQuote strokeWidth={2} className="size-3.5" />
+          {onBranch ? t`Ask here` : t`Reply`}
+          <span className="hidden text-[11px] text-muted-foreground pointer-fine:inline">
+            {quoteShortcutLabel({ desktop: Boolean(desktopBridge()), apple: isApplePlatform() })}
+          </span>
+        </Button>
+        {onBranch ? (
+          <Button
+            variant="default"
+            size="sm"
+            data-testid="branch-selection"
+            onClick={onBranch}
+            className="h-7 bg-success px-2.5 text-label text-background hover:bg-success/90"
+          >
+            <GitBranch strokeWidth={2} className="size-3.5" />
+            {t`Branch`}
+          </Button>
+        ) : null}
+        {inBranch && onKeepInMain ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="keep-selection"
+            onClick={onKeepInMain}
+            className="h-7 px-2.5 text-label"
+          >
+            <BookmarkPlus strokeWidth={2} className="size-3.5" />
+            {t`Keep in Main`}
+          </Button>
+        ) : null}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={t`Copy`}
+          onClick={() => {
+            const selected = range.toString();
+            if (selected) void navigator.clipboard?.writeText(selected);
+          }}
+          className="h-7 px-2 text-label"
+        >
+          <Copy strokeWidth={2} className="size-3.5" />
+          {t`Copy`}
+        </Button>
+      </div>
     </div>,
     document.body,
   );

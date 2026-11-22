@@ -1,8 +1,19 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { Bot, Group, ThreadSnapshot } from "@rakazo/contracts";
+import type {
+  Bot,
+  CharacterRef,
+  ContextPreview,
+  Episode,
+  Group,
+  Scene,
+  Shot,
+  ThreadSnapshot,
+} from "@rakazo/contracts";
 import { Button } from "@rakazo/ui-web";
 import { X } from "lucide-react";
-import type { ComponentProps, Dispatch, ReactNode, SetStateAction } from "react";
+import { type ComponentProps, type Dispatch, type ReactNode, type SetStateAction, useEffect, useState } from "react";
+import { ContextInspectorSheet } from "../../components/branching/ContextInspectorSheet";
+import { MicrodramaStudioShell } from "../../components/microdrama/MicrodramaStudioShell";
 import { PagesList } from "../../components/pages/PagesList";
 import type { createSpaceRpc } from "../../lib/query/rpc";
 import { RoutineEditor } from "../routines/RoutineEditor";
@@ -35,6 +46,12 @@ export function ShellSidePanel({
   modelFocusRequest,
   onClearBot,
   discardChatAttachments,
+  activeProjectId,
+  activeBranchId,
+  activeBranchInstructions,
+  isBranch,
+  onPinCharacterToContext,
+  onPromoteInstructionsToMain,
 }: {
   rpc: ReturnType<typeof createSpaceRpc>;
   panel: Panel;
@@ -57,9 +74,21 @@ export function ShellSidePanel({
   onClearBot: (bot: Bot) => void;
   /** Drops a deleted chat's pending attachments with their previews. */
   discardChatAttachments: (threadKey: string) => void;
+  activeProjectId?: string | null;
+  activeBranchId?: string | null;
+  activeBranchInstructions?: string | null;
+  isBranch?: boolean;
+  onPinCharacterToContext?: (char: CharacterRef) => void;
+  onPromoteInstructionsToMain?: () => void;
 }) {
   const { t } = useLingui();
-  const open = Boolean(panel && (active || activeGroup));
+  const open = Boolean(
+    panel &&
+      (active ||
+        activeGroup ||
+        panel === "microdrama-studio" ||
+        panel === "context-inspector"),
+  );
   const botView = panel === "routines" || panel === "pages" || panel === "settings" ? panel : null;
 
   async function createGroup(input: { name: string; botIds: string[] }) {
@@ -178,8 +207,135 @@ export function ShellSidePanel({
           {panel === "routine" && routineEditorProps ? (
             <RoutineEditor {...routineEditorProps} />
           ) : null}
+          {panel === "microdrama-studio" ? (
+            <MicrodramaStudioPanel
+              rpc={rpc}
+              projectId={activeProjectId ?? null}
+              onPinCharacterToContext={onPinCharacterToContext}
+            />
+          ) : null}
+          {panel === "context-inspector" ? (
+            <ContextInspectorPanel
+              rpc={rpc}
+              branchId={activeBranchId ?? null}
+              branchInstructions={activeBranchInstructions}
+              isBranch={Boolean(isBranch)}
+              onPromoteInstructionsToMain={onPromoteInstructionsToMain}
+            />
+          ) : null}
         </div>
       ) : null}
     </ResizableSidePanel>
+  );
+}
+
+function MicrodramaStudioPanel({
+  rpc,
+  projectId,
+  onPinCharacterToContext,
+}: {
+  rpc: ReturnType<typeof createSpaceRpc>;
+  projectId: string | null;
+  onPinCharacterToContext?: (char: CharacterRef) => void;
+}) {
+  const [episode, setEpisode] = useState<Episode | null>(null);
+  const [characters, setCharacters] = useState<CharacterRef[]>([]);
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [shots, setShots] = useState<Shot[]>([]);
+  const [approvedSpendMicros, setApprovedSpendMicros] = useState("0");
+
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    void (async () => {
+      const episodes = await rpc.microdrama.episodes.list({ projectId }).catch(() => []);
+      const firstEpisode = episodes[0];
+      if (cancelled || !firstEpisode) return;
+      const ws = await rpc.microdrama.episodes
+        .getWorkspace({ episodeId: firstEpisode.id })
+        .catch(() => null);
+      if (cancelled || !ws) return;
+      setEpisode(ws.episode);
+      setCharacters(ws.characters);
+      setScenes(ws.scenes);
+      setShots(ws.shots);
+      setApprovedSpendMicros(ws.approvedSpendMicros);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, projectId]);
+
+  return (
+    <MicrodramaStudioShell
+      episode={episode}
+      characters={characters}
+      scenes={scenes}
+      shots={shots}
+      approvedSpendMicros={approvedSpendMicros}
+      onCreateCharacter={async (input) => {
+        if (!projectId) return;
+        const created = await rpc.microdrama.cast.upsertCharacter({
+          projectId,
+          stableCode: input.stableCode,
+          name: input.name,
+          wardrobeNotes: input.wardrobeNotes,
+        });
+        setCharacters((prev) => [...prev.filter((c) => c.id !== created.id), created]);
+      }}
+      onPinCharacterToContext={(char) => onPinCharacterToContext?.(char)}
+    />
+  );
+}
+
+function ContextInspectorPanel({
+  rpc,
+  branchId,
+  branchInstructions,
+  isBranch,
+  onPromoteInstructionsToMain,
+}: {
+  rpc: ReturnType<typeof createSpaceRpc>;
+  branchId: string | null;
+  branchInstructions?: string | null;
+  isBranch: boolean;
+  onPromoteInstructionsToMain?: () => void;
+}) {
+  const [preview, setPreview] = useState<ContextPreview>({
+    branchId: branchId ?? "main",
+    requestedProvider: "openai",
+    requestedModelId: "gpt-5.4",
+    billingRoute: "hosted_credits",
+    estimatedInputTokens: 0,
+    contextWindow: 128_000,
+    estimatedCostMicros: "0",
+    includedMessageIds: [],
+    includedPlacementIds: [],
+    includedArtifactIds: [],
+    omittedItems: [],
+    warnings: [],
+  });
+
+  useEffect(() => {
+    if (!branchId) return;
+    let cancelled = false;
+    void rpc.branches
+      .previewContext({ branchId })
+      .then((res) => {
+        if (!cancelled) setPreview(res);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, branchId]);
+
+  return (
+    <ContextInspectorSheet
+      preview={preview}
+      branchInstructions={branchInstructions}
+      isBranch={isBranch}
+      onPromoteInstructionsToMain={onPromoteInstructionsToMain}
+    />
   );
 }

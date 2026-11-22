@@ -13,8 +13,10 @@ import type { ChildBotBlock, PeerExchange } from "@rakazo/core";
 import { isPeerReceiptBlocks, isToolActivityBlock, otherAuthor } from "@rakazo/core";
 import { BotAvatar, Button, cn, resolvePersonaColorDef } from "@rakazo/ui-web";
 import { UserRound } from "lucide-react";
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
+import { A2uiSurfaceCard } from "../../../components/a2ui/A2uiSurfaceCard";
 import { CollaborationMarker } from "../../../components/ai/CollaborationMarker";
+import { BlockReviewCard } from "../../../components/branching/BlockReviewCard";
 import { ComputerCard } from "../../../components/computers/ComputerCard";
 import { ArtifactFileCard } from "../../../components/messages/ArtifactFileCard";
 import { AskCard } from "../../../components/messages/AskCard";
@@ -91,6 +93,12 @@ export const MessageView = memo(function MessageView({
   onMarkUnread,
   markedUnread = false,
   onReact,
+  projectId,
+  branchId,
+  onBranch,
+  reviewBlocksActive = false,
+  onSaveBlockOrder,
+  onBranchBlockText,
 }: {
   artifactTarget: ArtifactTarget;
   canAnswer: boolean;
@@ -145,8 +153,15 @@ export const MessageView = memo(function MessageView({
   onMarkUnread: (message: ThreadMessage) => void;
   markedUnread?: boolean;
   onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
+  projectId?: string | null;
+  branchId?: string | null;
+  onBranch?: (message: ThreadMessage) => void;
+  reviewBlocksActive?: boolean;
+  onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
+  onBranchBlockText?: (message: ThreadMessage, blockText: string) => void;
 }) {
   const { t } = useLingui();
+  const [localBlockReview, setLocalBlockReview] = useState(false);
   const isNarration =
     message.role === "bot" &&
     message.blocks.length > 0 &&
@@ -258,6 +273,8 @@ export const MessageView = memo(function MessageView({
       onMarkUnread={onMarkUnread}
       markedUnread={markedUnread}
       onReact={onReact}
+      onBranch={onBranch}
+      onReviewBlocks={() => setLocalBlockReview((v) => !v)}
     />
   );
   if (isNarration) {
@@ -518,6 +535,34 @@ export const MessageView = memo(function MessageView({
               </div>
             );
           }
+          if (block.kind === "a2ui_surface") {
+            return (
+              <div key={i} className="flex justify-start">
+                <div className="w-full max-w-[min(88%,39rem)]">
+                  <A2uiSurfaceCard
+                    surface={block}
+                    onDispatchAction={async (action) => {
+                      if (!projectId || !branchId) return;
+                      const nonce = crypto.randomUUID();
+                      await rpc.a2ui.dispatchAction({
+                        projectId,
+                        branchId,
+                        messageId: message.id,
+                        surfaceId: action.surfaceId,
+                        componentId: action.componentId,
+                        actionId: action.actionId,
+                        payload: action.payload,
+                        actionNonce: nonce,
+                        clientNonce: nonce,
+                        wakeAgent: true,
+                      });
+                      await onRefresh();
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          }
           if (block.kind === "tool_question") {
             return (
               <div key={i} className="flex justify-start">
@@ -707,6 +752,28 @@ export const MessageView = memo(function MessageView({
         })}
         {hoverAnchorIndex === -1 ? hoverActions : null}
       </div>
+      {(localBlockReview || reviewBlocksActive) &&
+      !isLive &&
+      message.blocks.some((b) => b.kind === "text" && b.text.trim()) ? (
+        <div className="mt-2">
+          <BlockReviewCard
+            messageId={message.id}
+            markdown={message.blocks
+              .filter((b): b is Extract<MessageBlock, { kind: "text" }> => b.kind === "text")
+              .map((b) => b.text)
+              .join("\n\n")}
+            onSaveOrder={async (orderedBlockIds) => {
+              if (onSaveBlockOrder) {
+                await onSaveBlockOrder(message.id, orderedBlockIds);
+              }
+            }}
+            onBranchBlock={
+              onBranchBlockText ? (blockText) => onBranchBlockText(message, blockText) : undefined
+            }
+            onClose={() => setLocalBlockReview(false)}
+          />
+        </div>
+      ) : null}
       {pageCards}
     </>
   );

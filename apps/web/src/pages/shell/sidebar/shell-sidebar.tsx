@@ -1,17 +1,18 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { Bot, Group, NavLink } from "@rakazo/contracts";
+import type { Bot, Branch, Group, NavLink, Project } from "@rakazo/contracts";
 import { accountDisplay } from "@rakazo/core";
 import {
   Button,
+  Input,
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
   Sidebar,
 } from "@rakazo/ui-web";
-import { Search, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, ChevronRight, Film, FolderInput, FolderKanban, GitBranch, MessageSquarePlus, Plus, Search, SlidersHorizontal } from "lucide-react";
 import type { ReactNode, UIEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PasskeyOffer } from "../../../components/account/PasskeyOffer";
 import { useUsageHint } from "../../../components/billing/PlanUsage";
 import { useBilling } from "../../../components/billing/SubscriptionGate";
@@ -21,6 +22,7 @@ import { useSignOut } from "../../../lib/auth/sign-out";
 import { formatBillingDate } from "../../../lib/billing/billing";
 import type { BotsSidebarDensity } from "../../../lib/preferences/bots-sidebar-density-pref";
 import { useQueryUserId } from "../../../lib/query/query";
+import type { createSpaceRpc } from "../../../lib/query/rpc";
 import { switchOrganization, useOrganizations } from "../../../lib/spaces/organizations";
 import { ActivityList } from "../../space/ActivityList";
 import { SpaceSearchResults } from "../../space/SpaceSearch";
@@ -86,6 +88,15 @@ export function ShellSidebar({
   openIntegrations,
   openSkills,
   openSpaceChat,
+  rpc,
+  activeProjectId,
+  activeThreadId,
+  onSelectProject,
+  activeBranches,
+  activeBranchId,
+  onSelectBranch,
+  studioOpen,
+  onToggleStudio,
 }: {
   isMobile: boolean;
   mobileOpen: boolean;
@@ -116,6 +127,15 @@ export function ShellSidebar({
   openIntegrations: () => void;
   openSkills: () => void;
   openSpaceChat: (spaceId: string, path: string) => void;
+  rpc?: ReturnType<typeof createSpaceRpc>;
+  activeProjectId?: string | null;
+  activeThreadId?: string | null;
+  onSelectProject?: (project: Project) => void;
+  activeBranches?: readonly Branch[];
+  activeBranchId?: string | null;
+  onSelectBranch?: (branchId: string) => void;
+  studioOpen?: boolean;
+  onToggleStudio?: () => void;
 }) {
   const { t } = useLingui();
   const {
@@ -287,7 +307,76 @@ export function ShellSidebar({
               }}
             />
           ) : (
-            roster
+            <>
+              {rpc && !mini ? (
+                <ProjectsAndChatsShelf
+                  rpc={rpc}
+                  bots={bots}
+                  activeProjectId={activeProjectId ?? null}
+                  activeThreadId={activeThreadId ?? null}
+                  collapsedSections={collapsedSidebarSections}
+                  onToggleSection={toggleSidebarSection}
+                  onSelectProject={(project) => {
+                    onSelectProject?.(project);
+                    if (project.mode === "microdrama") {
+                      setPanel("microdrama-studio");
+                    }
+                    setMobileOpen(false);
+                  }}
+                  onOpenChat={(botId) => {
+                    setMobileOpen(false);
+                    navigate(`/app/${botId}`);
+                  }}
+                />
+              ) : null}
+              {roster}
+              {!mini &&
+              activeBranches &&
+              activeBranches.filter((b) => !b.isMain && !b.archivedAt).length > 0 &&
+              onSelectBranch ? (
+                <div className="mt-2 px-1">
+                  <button
+                    type="button"
+                    onClick={() => toggleSidebarSection("clone-active-branches")}
+                    className="flex w-full items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                  >
+                    {collapsedSidebarSections.has("clone-active-branches") ? (
+                      <ChevronRight className="size-3" />
+                    ) : (
+                      <ChevronDown className="size-3" />
+                    )}
+                    <span>Chat Branches</span>
+                    <span className="ml-auto text-[10px]">
+                      {activeBranches.filter((b) => !b.isMain && !b.archivedAt).length}
+                    </span>
+                  </button>
+                  {!collapsedSidebarSections.has("clone-active-branches") ? (
+                    <div className="space-y-0.5 pl-1">
+                      {activeBranches
+                        .filter((b) => !b.isMain && !b.archivedAt)
+                        .map((b) => (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectBranch(b.id);
+                              setMobileOpen(false);
+                            }}
+                            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors ${
+                              activeBranchId === b.id
+                                ? "bg-success/15 text-success"
+                                : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                            }`}
+                          >
+                            <GitBranch className="size-3.5 shrink-0 text-success" />
+                            <span className="truncate">{b.name}</span>
+                          </button>
+                        ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
         {/* One height limit for every shelf, so open shelves never squeeze out the chat list. */}
@@ -300,6 +389,27 @@ export function ShellSidebar({
         >
           {archived}
         </div>
+        {onToggleStudio ? (
+          <div className="px-2.5 pb-1.5">
+            <Button
+              type="button"
+              variant={studioOpen ? "default" : "outline"}
+              size="sm"
+              aria-label="Microdrama Studio"
+              aria-pressed={Boolean(studioOpen)}
+              onClick={() => {
+                onToggleStudio();
+                setMobileOpen(false);
+              }}
+              className={`h-8 w-full justify-start gap-2 rounded-xl text-xs font-medium ${
+                mini ? "justify-center px-0" : "px-2.5"
+              }`}
+            >
+              <Film className="size-3.5 shrink-0" />
+              {!mini ? <span className="truncate">Microdrama Studio</span> : null}
+            </Button>
+          </div>
+        ) : null}
         <div className={mini ? "hidden" : "contents"}>
           <PasskeyOffer />
         </div>
@@ -333,6 +443,15 @@ function ShellSidebarFooter({
   openIntegrations,
   openSkills,
   openSpaceChat,
+  rpc,
+  activeProjectId,
+  activeThreadId,
+  onSelectProject,
+  activeBranches,
+  activeBranchId,
+  onSelectBranch,
+  studioOpen,
+  onToggleStudio,
 }: {
   mini: boolean;
   logos: Array<{ name: string; logo?: string | null }>;
@@ -345,6 +464,15 @@ function ShellSidebarFooter({
   openIntegrations: () => void;
   openSkills: () => void;
   openSpaceChat: (spaceId: string, path: string) => void;
+  rpc?: ReturnType<typeof createSpaceRpc>;
+  activeProjectId?: string | null;
+  activeThreadId?: string | null;
+  onSelectProject?: (project: Project) => void;
+  activeBranches?: readonly Branch[];
+  activeBranchId?: string | null;
+  onSelectBranch?: (branchId: string) => void;
+  studioOpen?: boolean;
+  onToggleStudio?: () => void;
 }) {
   const { t, i18n } = useLingui();
   const userId = useQueryUserId();
@@ -467,5 +595,255 @@ function ShellSidebarFooter({
         <InviteDialog referral={referral} open={inviteOpen} onOpenChange={setInviteOpen} />
       ) : null}
     </>
+  );
+}
+
+function ProjectsAndChatsShelf({
+  rpc,
+  bots,
+  activeProjectId,
+  activeThreadId,
+  collapsedSections,
+  onToggleSection,
+  onSelectProject,
+  onOpenChat,
+}: {
+  rpc: ReturnType<typeof createSpaceRpc>;
+  bots: Bot[];
+  activeProjectId: string | null;
+  activeThreadId: string | null;
+  collapsedSections: ReadonlySet<string>;
+  onToggleSection: (key: string) => void;
+  onSelectProject: (project: Project) => void;
+  onOpenChat: (botId: string) => void;
+}) {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [independentChats, setIndependentChats] = useState<
+    Array<{ threadId: string; assistantBotId: string; title: string }>
+  >([]);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [newProjectTitle, setNewProjectTitle] = useState("");
+  const [newProjectMode, setNewProjectMode] = useState<"general" | "microdrama">("general");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void rpc.projects
+      .list({})
+      .then((list) => {
+        if (!cancelled) setProjects(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc]);
+
+  const projectsCollapsed = collapsedSections.has("clone-projects");
+  const chatsCollapsed = collapsedSections.has("clone-independent-chats");
+
+  async function handleNewChat() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const created = await rpc.projects.createIndependentChat({
+        assistantBotId: bots[0]?.id,
+      });
+      setIndependentChats((prev) => [
+        {
+          threadId: created.threadId,
+          assistantBotId: created.assistantBotId,
+          title: `Chat ${prev.length + 1}`,
+        },
+        ...prev,
+      ]);
+      onOpenChat(created.assistantBotId);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateProject() {
+    const title = newProjectTitle.trim();
+    if (!title || busy) return;
+    setBusy(true);
+    try {
+      const { project } = await rpc.projects.create({
+        title,
+        mode: newProjectMode,
+        defaultBotId: bots[0]?.id,
+      });
+      setProjects((prev) => [project, ...prev]);
+      setNewProjectTitle("");
+      setCreatingProject(false);
+      onSelectProject(project);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mb-2 space-y-1.5 border-b border-sidebar-border/60 pb-2">
+      <div className="grid grid-cols-2 gap-1.5 px-1">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => void handleNewChat()}
+          className="h-7 justify-start gap-1.5 px-2 text-xs"
+        >
+          <MessageSquarePlus className="size-3.5" />
+          <span className="truncate">New Chat</span>
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => setCreatingProject((open) => !open)}
+          className="h-7 justify-start gap-1.5 px-2 text-xs"
+        >
+          <Plus className="size-3.5" />
+          <span className="truncate">New Project</span>
+        </Button>
+      </div>
+
+      {creatingProject ? (
+        <div className="space-y-1.5 rounded-lg border border-border bg-card/70 p-2">
+          <Input
+            value={newProjectTitle}
+            onChange={(e) => setNewProjectTitle(e.target.value)}
+            placeholder="Project title..."
+            className="h-7 text-xs"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreateProject();
+            }}
+          />
+          <div className="flex items-center justify-between gap-1">
+            <div className="flex gap-1">
+              <Button
+                type="button"
+                size="sm"
+                variant={newProjectMode === "general" ? "default" : "ghost"}
+                onClick={() => setNewProjectMode("general")}
+                className="h-6 px-2 text-[11px]"
+              >
+                General
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={newProjectMode === "microdrama" ? "default" : "ghost"}
+                onClick={() => setNewProjectMode("microdrama")}
+                className="h-6 px-2 text-[11px]"
+              >
+                Microdrama
+              </Button>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!newProjectTitle.trim() || busy}
+              onClick={() => void handleCreateProject()}
+              className="h-6 px-2 text-[11px]"
+            >
+              Create
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div>
+        <button
+          type="button"
+          onClick={() => onToggleSection("clone-projects")}
+          className="flex w-full items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
+        >
+          {projectsCollapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+          <span>Projects</span>
+          <span className="ml-auto text-[10px]">{projects.length}</span>
+        </button>
+        {!projectsCollapsed ? (
+          <div className="space-y-0.5">
+            {projects.length === 0 ? (
+              <div className="px-2 py-1 text-[11px] text-muted-foreground">No projects yet</div>
+            ) : (
+              projects.map((project) => (
+                <div
+                  key={project.id}
+                  className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition-colors ${
+                    activeProjectId === project.id
+                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                      : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectProject(project)}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    {project.mode === "microdrama" ? (
+                      <Film className="size-3.5 shrink-0 text-success" />
+                    ) : (
+                      <FolderKanban className="size-3.5 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="truncate">{project.title}</span>
+                  </button>
+                  {activeThreadId && activeProjectId !== project.id ? (
+                    <button
+                      type="button"
+                      title={`Move current chat into ${project.title}`}
+                      aria-label={`Move current chat into ${project.title}`}
+                      onClick={() => {
+                        void rpc.projects
+                          .moveThreadToProject({
+                            threadId: activeThreadId,
+                            targetProjectId: project.id,
+                          })
+                          .then(() => onSelectProject(project))
+                          .catch(() => undefined);
+                      }}
+                      className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                    >
+                      <FolderInput className="size-3.5" />
+                    </button>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {independentChats.length > 0 ? (
+        <div>
+          <button
+            type="button"
+            onClick={() => onToggleSection("clone-independent-chats")}
+            className="flex w-full items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
+          >
+            {chatsCollapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+            <span>Independent Chats</span>
+            <span className="ml-auto text-[10px]">{independentChats.length}</span>
+          </button>
+          {!chatsCollapsed ? (
+            <div className="space-y-0.5">
+              {independentChats.map((chat) => (
+                <button
+                  key={chat.threadId}
+                  type="button"
+                  onClick={() => onOpenChat(chat.assistantBotId)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-sidebar-foreground hover:bg-sidebar-accent/50"
+                >
+                  <MessageSquarePlus className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{chat.title}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

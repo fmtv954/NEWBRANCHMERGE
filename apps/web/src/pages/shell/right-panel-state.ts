@@ -5,6 +5,8 @@ export type Panel =
   | "routine"
   | "create-group"
   | "group-settings"
+  | "microdrama-studio"
+  | "context-inspector"
   | null;
 export type RightPanelState = { panel: Panel; routineId?: string };
 
@@ -16,6 +18,8 @@ const durablePanels: readonly (string | null)[] = [
   "settings",
   "routine",
   "group-settings",
+  "microdrama-studio",
+  "context-inspector",
   null,
 ];
 

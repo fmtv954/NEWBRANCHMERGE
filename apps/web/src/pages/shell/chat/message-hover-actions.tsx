@@ -13,7 +13,16 @@ import {
   PopoverTrigger,
   useCopyText,
 } from "@rakazo/ui-web";
-import { Check, Copy, MessageSquareDot, MoreHorizontal, Reply, Smile } from "lucide-react";
+import {
+  Check,
+  Copy,
+  GitBranch,
+  Layers,
+  MessageSquareDot,
+  MoreHorizontal,
+  Reply,
+  Smile,
+} from "lucide-react";
 import { useState } from "react";
 import { MessageHoverMetadata } from "../../../components/messages/MessageHoverMetadata";
 
@@ -24,6 +33,8 @@ export function MessageHoverActions({
   onMarkUnread,
   markedUnread = false,
   onReact,
+  onBranch,
+  onReviewBlocks,
 }: {
   message: ThreadMessage;
   side: "start" | "end";
@@ -31,6 +42,8 @@ export function MessageHoverActions({
   onMarkUnread: (message: ThreadMessage) => void;
   markedUnread?: boolean;
   onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
+  onBranch?: (message: ThreadMessage) => void;
+  onReviewBlocks?: (message: ThreadMessage) => void;
 }) {
   const { t } = useLingui();
   const [copiedNow, copy, copyFailed, resetCopy, copyFailedText] = useCopyText();
@@ -94,6 +107,28 @@ export function MessageHoverActions({
         >
           <Reply size={15} strokeWidth={1.7} />
         </button>
+        {onBranch ? (
+          <button
+            type="button"
+            aria-label="Branch from here"
+            title="Branch from here"
+            onClick={() => onBranch(message)}
+            className={iconButtonClass}
+          >
+            <GitBranch size={15} strokeWidth={1.7} />
+          </button>
+        ) : null}
+        {onReviewBlocks ? (
+          <button
+            type="button"
+            aria-label="Review & reorder blocks"
+            title="Review & reorder blocks"
+            onClick={() => onReviewBlocks(message)}
+            className={iconButtonClass}
+          >
+            <Layers size={15} strokeWidth={1.7} />
+          </button>
+        ) : null}
         <DropdownMenu open={moreOpen} onOpenChange={setMoreOpen}>
           <DropdownMenuTrigger
             aria-label={copied ? t`Copied` : t`More`}

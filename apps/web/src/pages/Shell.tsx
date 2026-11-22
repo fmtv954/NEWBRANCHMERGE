@@ -2,6 +2,11 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import type {
   AgentSkillCatalogEntry,
   Bot,
+  Branch,
+  MergeReceipt,
+  MergeReview,
+  Placement,
+  Project,
   SpaceMemoryConfig,
   ThreadMessage,
   VoiceStatus,
@@ -24,7 +29,7 @@ import {
   workingRoutineName,
 } from "@rakazo/core";
 import type { GroupAvatarMember } from "@rakazo/ui-web";
-import { Button } from "@rakazo/ui-web";
+import { Button, toast } from "@rakazo/ui-web";
 import { useIsMobile } from "@rakazo/ui-web/hooks/use-mobile";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
@@ -39,6 +44,8 @@ import {
 } from "react";
 import { useParams } from "react-router-dom";
 import { CallCard, CallReturnBar } from "../components/call/CallCard";
+import { MergeBranchModal } from "../components/branching/MergeBranchModal";
+import { SideBranchPane } from "../components/branching/SideBranchPane";
 import { IncomingCall } from "../components/call/IncomingCall";
 import { ComputerUpdateProgress } from "../components/computers/ComputerUpdateProgress";
 import { PageLoading } from "../components/PageLoading";
@@ -90,7 +97,10 @@ import { useReadAloud } from "./shell/chat/use-read-aloud";
 import { useThreadState } from "./shell/chat/use-thread-state";
 import { useThreadSync } from "./shell/chat/use-thread-sync";
 import { Composer } from "./shell/composer/composer";
-import { ComposerModelPicker } from "./shell/composer/composer-model-picker";
+import {
+  ComposerModelPicker,
+  type SelectedMediaModel,
+} from "./shell/composer/composer-model-picker";
 import { useComposerActions } from "./shell/composer/use-composer-actions";
 import { useComposerMentions } from "./shell/composer/use-composer-mentions";
 import { ComputerOverlay } from "./shell/computers/computer-overlay";
@@ -213,6 +223,111 @@ function SpaceShell() {
   const showComposerModel = composerModelPickerPreference.use();
   const rightPanel = useRightPanel({ searchParams, setSearchParams });
   const { panel, setPanel, modelFocusRequest, setModelFocusRequest } = rightPanel;
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [projectBranches, setProjectBranches] = useState<Branch[]>([]);
+  const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
+  const [activeMediaModel, setActiveMediaModel] = useState<SelectedMediaModel | null>(null);
+  const [sideBranch, setSideBranch] = useState<Branch | null>(null);
+  const [sideBranchFocusQuote, setSideBranchFocusQuote] = useState<string | null>(null);
+  const [showArchivedBranches, setShowArchivedBranches] = useState(false);
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
+  const [mergeModalInitialText, setMergeModalInitialText] = useState("");
+  const [reviewBlocksOpen, setReviewBlocksOpen] = useState(false);
+  const [branchPlacements, setBranchPlacements] = useState<Placement[]>([]);
+  const [activeMergeReview, setActiveMergeReview] = useState<MergeReview | null>(null);
+  const [mergeReceipts, setMergeReceipts] = useState<MergeReceipt[]>([]);
+
+  async function ensureGraphForActiveThread() {
+    if (activeProject && activeBranchId) {
+      return { project: activeProject, branches: projectBranches, activeBranchId };
+    }
+    const threadId = activeSnapshot?.threadId;
+    if (!threadId) return null;
+    const ensured = await rpc.projects.ensureThreadGraph({
+      threadId,
+      title: active?.name ?? activeGroup?.name ?? "Chat",
+    });
+    setActiveProject(ensured.project);
+    setProjectBranches(ensured.branches);
+    setActiveBranchId(ensured.activeBranchId);
+    return ensured;
+  }
+
+  function autoBranchName(quoteText?: string): string {
+    if (quoteText && quoteText.trim()) {
+      const words = quoteText.trim().split(/\s+/).slice(0, 5).join(" ");
+      return `BRANCH - ${words}${quoteText.trim().split(/\s+/).length > 5 ? "…" : ""}`;
+    }
+    const chatTitle = active?.name ?? activeGroup?.name ?? "Chat";
+    const version = projectBranches.filter((b) => !b.isMain).length + 2;
+    return `BRANCH - ${chatTitle} v${version}`;
+  }
+
+  async function handleInstantBranch(input: {
+    messageId?: string;
+    quoteText?: string;
+    utf16Start?: number;
+    utf16End?: number;
+  }) {
+    const graph = await ensureGraphForActiveThread();
+    if (!graph) return;
+    const mainBranch = graph.branches.find((b) => b.isMain) ?? graph.branches[0];
+    if (!mainBranch) return;
+    const hasRange =
+      typeof input.utf16Start === "number" &&
+      typeof input.utf16End === "number" &&
+      Boolean(input.quoteText);
+    const created = await rpc.branches.create({
+      projectId: graph.project.id,
+      sourceBranchId: mainBranch.id,
+      name: autoBranchName(input.quoteText),
+      sourceMessageId: input.messageId,
+      selectionRange: hasRange
+        ? {
+            startBlockId: "text_0",
+            endBlockId: "text_0",
+            startUtf16: input.utf16Start!,
+            endUtf16: input.utf16End!,
+            quoteText: input.quoteText!,
+            textDigest: "",
+          }
+        : undefined,
+      contextMode: "through_message",
+      defaultModelProvider: active?.modelProvider ?? "openai",
+      defaultModelId: active?.modelId ?? "gpt-6.2-sol",
+    });
+    setProjectBranches((prev) => [...prev, created]);
+    setSideBranch(created);
+    setSideBranchFocusQuote(input.quoteText ?? null);
+  }
+
+  useEffect(() => {
+    if (!activeProject?.id) {
+      setProjectBranches([]);
+      setActiveBranchId(null);
+      setBranchPlacements([]);
+      return;
+    }
+    let cancelled = false;
+    void rpc.branches
+      .list({ projectId: activeProject.id, includeArchived: true })
+      .then(async (list) => {
+        if (cancelled) return;
+        setProjectBranches(list);
+        const mainB = list.find((b) => b.isMain) ?? list[0] ?? null;
+        setActiveBranchId((current) =>
+          current && list.some((b) => b.id === current) ? current : (mainB?.id ?? null),
+        );
+        if (mainB) {
+          const placed = await rpc.placements.list({ branchId: mainB.id }).catch(() => []);
+          if (!cancelled) setBranchPlacements(placed);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.id, rpc]);
   const [peerConversation, setPeerConversation] = usePreloadRecoveryState<{
     peerBotId: string;
     peerBotName: string;
@@ -618,6 +733,37 @@ function SpaceShell() {
     : snapshot?.botId === active?.id
       ? snapshot
       : null;
+
+  useEffect(() => {
+    const threadId = activeSnapshot?.threadId;
+    if (!threadId) return;
+    let cancelled = false;
+    void rpc.projects
+      .ensureThreadGraph({
+        threadId,
+        title: active?.name ?? activeGroup?.name ?? "Chat",
+      })
+      .then(async (ensured) => {
+        if (cancelled) return;
+        setActiveProject(ensured.project);
+        const allBranches = await rpc.branches
+          .list({ projectId: ensured.project.id, includeArchived: true })
+          .catch(() => ensured.branches);
+        if (cancelled) return;
+        setProjectBranches(allBranches);
+        const mainB = allBranches.find((b) => b.isMain) ?? allBranches[0] ?? null;
+        setActiveBranchId(mainB?.id ?? ensured.activeBranchId);
+        setSideBranch(null);
+        if (mainB) {
+          const placed = await rpc.placements.list({ branchId: mainB.id }).catch(() => []);
+          if (!cancelled) setBranchPlacements(placed);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSnapshot?.threadId, rpc]);
   const currentRuns = activeThreadRuns(activeSnapshot);
   const answerableAskIds = useMemo(
     () => answerableAskMessageIds(activeSnapshot, userId),
@@ -1034,6 +1180,21 @@ function SpaceShell() {
         setNewSpaceOpen={dialogs.setNewSpaceOpen}
         setCreateBotOpen={dialogs.setCreateBotOpen}
         chatMenu={chatMenu}
+        rpc={rpc}
+        activeProjectId={activeProject?.id ?? null}
+        activeThreadId={activeSnapshot?.threadId ?? null}
+        onSelectProject={(project) => setActiveProject(project)}
+        activeBranches={projectBranches}
+        activeBranchId={sideBranch?.id ?? activeBranchId}
+        onSelectBranch={(id) => {
+          setActiveBranchId(id);
+          const picked = projectBranches.find((b) => b.id === id) ?? null;
+          setSideBranch(picked && !picked.isMain ? picked : null);
+        }}
+        studioOpen={panel === "microdrama-studio"}
+        onToggleStudio={() =>
+          setPanel(panel === "microdrama-studio" ? null : "microdrama-studio")
+        }
         roster={
           <SidebarRoster
             mini={miniSidebar}
@@ -1122,110 +1283,178 @@ function SpaceShell() {
         <div
           ref={chatColumnRef}
           data-finding={findOpen || undefined}
-          className="relative flex min-h-0 flex-1 flex-col"
+          className="relative flex min-h-0 flex-1 overflow-hidden"
         >
-          {/* Only the pills take input; the gaps pass clicks and scrolling to the transcript. */}
-          <div aria-hidden="true" className="app-drag absolute inset-x-0 top-0 z-10 h-3" />
-          {findOpen ? (
-            <div className="absolute end-3 top-14 z-20">
-              <ChatFindBar
-                scope={chatColumnRef}
-                inputRef={findInputRef}
-                onClose={() => {
-                  setFindOpen(false);
-                  focusComposer();
-                }}
-              />
-            </div>
-          ) : null}
-          <ChatHeader
-            inGroup={inGroup}
-            active={active}
-            activeGroup={activeGroup}
-            activeSnapshot={activeSnapshot}
-            phoneCallsEnabled={Boolean(bootstrapMe?.phoneCallsEnabled)}
-            meetingsEnabled={Boolean(bootstrapMe?.meetingsEnabled)}
-            voiceReady={Boolean(voiceStatus?.ready)}
-            inCall={Boolean(active) && call?.botId === active?.id}
-            panelOpen={chatPanelOpen}
-            onOpenNavigation={() => setMobileSidebarOpen(true)}
-            onTogglePanel={toggleChatPanel}
-            onCall={(bot) => {
-              if (call?.botId === bot.id) {
-                setCallMinimized(false);
-                return;
-              }
-              callBot(bot);
-            }}
-          />
-          {showNewBotPrompt ? (
-            <div className="grid flex-1 place-items-center">
-              <Button onClick={() => dialogs.setCreateBotOpen(true)}>
-                <Plus size={16} aria-hidden="true" />
-                <Trans>New bot</Trans>
-              </Button>
-            </div>
-          ) : (
-            <Transcript
-              key={activeSnapshot?.threadId}
-              meId={userId}
-              scrollRef={thread.messageScroll}
-              scrollRequest={scrollRequest}
-              onScrollRequestHandled={clearScrollRequest}
-              followRequest={composer.sentCount}
-              artifactTarget={transcriptArtifactTarget}
-              markedUnreadMessageId={read.markedUnreadMessageId}
-              transcript={transcript}
-              showToolActivity={showToolActivity}
-              olderCursor={activeSnapshot?.olderCursor ?? null}
-              unreadAfterSeq={read.unreadAfterSeq}
-              loadingOlder={loadingOlder}
-              answerableAskIds={answerableAskIds}
-              dismissableAskIds={dismissableAskIds}
-              running={transcriptRunning}
-              workingBots={workingBots}
-              workingRoutine={workingRoutineName(workingRuns)}
-              userBubble={userBubble}
-              onCallBack={
-                bootstrapMe?.phoneCallsEnabled && !inGroup && active
-                  ? () => callBot(active)
-                  : undefined
-              }
-              onLoadOlder={loadOlder}
-              onOpenBot={openBot}
-              onAnswer={composer.answerMessage}
-              onReply={replyToMessage}
-              onMarkUnread={markMessageUnread}
-              onQuote={quoteMessage}
-              onQuoteShortcutChange={registerQuoteShortcut}
-              onReact={composer.reactToMessage}
-              onJumpToMessage={jumpToReplyMessage}
-              onOpenPeerMessages={openPeerMessages}
-              memberName={resolveTranscriptMemberName}
-              peerBot={resolveTranscriptBot}
-              onRefresh={refreshActiveThread}
-              onBotChanged={refreshBots}
-              onAddRoutine={addSkillRoutine}
-              voiceReady={Boolean(voiceStatus?.ready)}
-              speakingMessageId={speakingMessageId}
-              callHoldsSpeaker={callHoldsSpeaker}
-              onSpeak={speakMessage}
-              onOpenComputer={computerControls.onOpenComputer}
-              onReleaseComputer={computerControls.onReleaseComputer}
-              onOpenImportSetup={openImportSetup}
-              rpc={rpc}
-            />
-          )}
-        </div>
-        {active || activeGroup ? (
-          // Let messages continue behind the composer's rounded top corners.
-          <div className="pointer-events-none relative z-30 -mt-7">
-            {recordingSkill ? (
-              <div className="pointer-events-auto bg-background px-6 pb-2 text-center text-body-sm text-destructive">
-                <Trans>Teaching in progress. Stop teaching before sending a new message.</Trans>
+          {/* Left Main Column: scoped ChatHeader + Transcript + Composer (never overlaps SideBranchPane) */}
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* Only the pills take input; the gaps pass clicks and scrolling to the transcript. */}
+            <div aria-hidden="true" className="app-drag absolute inset-x-0 top-0 z-10 h-3" />
+            {findOpen ? (
+              <div className="absolute end-3 top-14 z-20">
+                <ChatFindBar
+                  scope={chatColumnRef}
+                  inputRef={findInputRef}
+                  onClose={() => {
+                    setFindOpen(false);
+                    focusComposer();
+                  }}
+                />
               </div>
             ) : null}
-            <Composer
+            <ChatHeader
+              inGroup={inGroup}
+              active={active}
+              activeGroup={activeGroup}
+              activeSnapshot={activeSnapshot}
+              phoneCallsEnabled={Boolean(bootstrapMe?.phoneCallsEnabled)}
+              meetingsEnabled={Boolean(bootstrapMe?.meetingsEnabled)}
+              voiceReady={Boolean(voiceStatus?.ready)}
+              inCall={Boolean(active) && call?.botId === active?.id}
+              panelOpen={chatPanelOpen}
+              onOpenNavigation={() => setMobileSidebarOpen(true)}
+              onTogglePanel={toggleChatPanel}
+              branches={projectBranches}
+              activeBranchId={sideBranch?.id ?? activeBranchId}
+              showArchivedBranches={showArchivedBranches}
+              onToggleShowArchivedBranches={() => setShowArchivedBranches((v) => !v)}
+              onSelectBranch={(id) => {
+                setActiveBranchId(id);
+                const picked = projectBranches.find((b) => b.id === id) ?? null;
+                setSideBranch(picked && !picked.isMain ? picked : null);
+              }}
+              onCreateBranch={() => void handleInstantBranch({})}
+              onMergeBranch={() => {
+                if (!sideBranch) return;
+                setMergeModalOpen(true);
+              }}
+              splitViewOpen={Boolean(sideBranch)}
+              onToggleSplitView={() => {
+                if (sideBranch) {
+                  setSideBranch(null);
+                } else {
+                  const existingSide = projectBranches.find((b) => !b.isMain && !b.archivedAt);
+                  if (existingSide) setSideBranch(existingSide);
+                  else void handleInstantBranch({});
+                }
+              }}
+              reviewBlocksOpen={reviewBlocksOpen}
+              onToggleReviewBlocks={() => setReviewBlocksOpen((v) => !v)}
+              onCall={(bot) => {
+                if (call?.botId === bot.id) {
+                  setCallMinimized(false);
+                  return;
+                }
+                callBot(bot);
+              }}
+            />
+            {showNewBotPrompt ? (
+              <div className="grid flex-1 place-items-center">
+                <Button onClick={() => dialogs.setCreateBotOpen(true)}>
+                  <Plus size={16} aria-hidden="true" />
+                  <Trans>New bot</Trans>
+                </Button>
+              </div>
+            ) : (
+              <Transcript
+                key={activeSnapshot?.threadId}
+                projectId={activeProject?.id ?? null}
+                branchId={activeBranchId}
+                placements={branchPlacements}
+                activeMergeReview={activeMergeReview}
+                mergeReceipts={mergeReceipts}
+                reviewBlocksOpen={reviewBlocksOpen}
+                onInstantBranch={(input) => void handleInstantBranch(input)}
+                onReorderPlacements={async (orderedIds) => {
+                  const mainB = projectBranches.find((b) => b.isMain) ?? projectBranches[0];
+                  if (!mainB) return;
+                  const updated = await rpc.placements.reorder({
+                    branchId: mainB.id,
+                    orderedPlacementIds: orderedIds,
+                  });
+                  setBranchPlacements(updated);
+                }}
+                onRemovePlacement={async (placementId) => {
+                  await rpc.placements.remove({ placementId });
+                  setBranchPlacements((prev) => prev.filter((p) => p.id !== placementId));
+                }}
+                onSaveBlockOrder={async (messageId, orderedBlockIds) => {
+                  const graph = await ensureGraphForActiveThread();
+                  if (!graph) return;
+                  await rpc.projects.reorderMessageBlocks({
+                    projectId: graph.project.id,
+                    branchId: graph.activeBranchId,
+                    messageId,
+                    orderedBlockIds,
+                    idempotencyKey: crypto.randomUUID(),
+                  });
+                  await refreshActiveThread();
+                  toast.success("Block order committed");
+                }}
+                onBranchCreated={async (createdBranchId) => {
+                  if (!activeProject?.id) return;
+                  const list = await rpc.branches
+                    .list({ projectId: activeProject.id, includeArchived: true })
+                    .catch(() => null);
+                  if (list) setProjectBranches(list);
+                  setActiveBranchId(createdBranchId);
+                }}
+                meId={userId}
+                scrollRef={thread.messageScroll}
+                scrollRequest={scrollRequest}
+                onScrollRequestHandled={clearScrollRequest}
+                followRequest={composer.sentCount}
+                artifactTarget={transcriptArtifactTarget}
+                markedUnreadMessageId={read.markedUnreadMessageId}
+                transcript={transcript}
+                showToolActivity={showToolActivity}
+                olderCursor={activeSnapshot?.olderCursor ?? null}
+                unreadAfterSeq={read.unreadAfterSeq}
+                loadingOlder={loadingOlder}
+                answerableAskIds={answerableAskIds}
+                dismissableAskIds={dismissableAskIds}
+                running={transcriptRunning}
+                workingBots={workingBots}
+                workingRoutine={workingRoutineName(workingRuns)}
+                userBubble={userBubble}
+                onCallBack={
+                  bootstrapMe?.phoneCallsEnabled && !inGroup && active
+                    ? () => callBot(active)
+                    : undefined
+                }
+                onLoadOlder={loadOlder}
+                onOpenBot={openBot}
+                onAnswer={composer.answerMessage}
+                onReply={replyToMessage}
+                onMarkUnread={markMessageUnread}
+                onQuote={quoteMessage}
+                onQuoteShortcutChange={registerQuoteShortcut}
+                onReact={composer.reactToMessage}
+                onJumpToMessage={jumpToReplyMessage}
+                onOpenPeerMessages={openPeerMessages}
+                memberName={resolveTranscriptMemberName}
+                peerBot={resolveTranscriptBot}
+                onRefresh={refreshActiveThread}
+                onBotChanged={refreshBots}
+                onAddRoutine={addSkillRoutine}
+                voiceReady={Boolean(voiceStatus?.ready)}
+                speakingMessageId={speakingMessageId}
+                callHoldsSpeaker={callHoldsSpeaker}
+                onSpeak={speakMessage}
+                onOpenComputer={computerControls.onOpenComputer}
+                onReleaseComputer={computerControls.onReleaseComputer}
+                onOpenImportSetup={openImportSetup}
+                rpc={rpc}
+              />
+            )}
+            {active || activeGroup ? (
+              // Let messages continue behind the composer's rounded top corners.
+              <div className="pointer-events-none relative z-30 -mt-7">
+                {recordingSkill ? (
+                  <div className="pointer-events-auto bg-background px-6 pb-2 text-center text-body-sm text-destructive">
+                    <Trans>Teaching in progress. Stop teaching before sending a new message.</Trans>
+                  </div>
+                ) : null}
+                <Composer
               key={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
               draftKey={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
               enterToSend={enterToSend}
@@ -1235,6 +1464,8 @@ function SpaceShell() {
                   <ComposerModelPicker
                     bot={active}
                     disabled={Boolean(recordingSkill)}
+                    activeMediaModel={activeMediaModel}
+                    onSelectMediaModel={setActiveMediaModel}
                     onConnect={() => openSettings("models")}
                     onSaved={(updated) =>
                       setBots((current) =>
@@ -1244,7 +1475,13 @@ function SpaceShell() {
                   />
                 ) : undefined
               }
-              activeName={inGroup ? (activeGroup?.name ?? activeSnapshot?.groupName) : active?.name}
+              activeName={
+                activeMediaModel
+                  ? `${activeMediaModel.kind === "image" ? "Image" : "Video"} (${activeMediaModel.displayName})`
+                  : inGroup
+                    ? (activeGroup?.name ?? activeSnapshot?.groupName)
+                    : active?.name
+              }
               running={composerRunning}
               disabled={Boolean(recordingSkill)}
               pendingAttachments={composer.activePendingAttachments}
@@ -1274,7 +1511,40 @@ function SpaceShell() {
               fileInputRef={composer.fileInputRef}
               onAttachmentPick={composer.onAttachmentPick}
               onRemoveAttachment={composer.removeAttachment}
-              onSend={composer.sendMessage}
+              onSend={async (text, ...rest) => {
+                if (activeMediaModel) {
+                  try {
+                    const provider = activeMediaModel.provider as
+                      | "openai"
+                      | "xai"
+                      | "fal"
+                      | "uncensoredllm"
+                      | "refuseless"
+                      | "venice"
+                      | "higgsfield";
+                    const result = await rpc.media.generate({
+                      threadId: activeSnapshot?.threadId,
+                      provider,
+                      modelId: activeMediaModel.modelId,
+                      kind: activeMediaModel.kind === "video" ? "video_gen" : "image_gen",
+                      prompt: text,
+                    });
+                    if (result.switched) {
+                      toast.info(
+                        `Switched from ${result.originalProvider ?? provider} (${result.switchReason ?? "fallback"}) to ${result.actualProvider}`,
+                      );
+                    } else if (result.status === "queued") {
+                      toast.success(`Queued ${activeMediaModel.kind} on ${result.actualProvider}`);
+                    }
+                    await refreshActiveThread();
+                    return true;
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Media generation failed");
+                    return false;
+                  }
+                }
+                return composer.sendMessage(text, ...rest);
+              }}
               onStop={stopRun}
               phoneCallsEnabled={bootstrapMe?.phoneCallsEnabled === true}
               dictationTranscribe={voiceStatus ? Boolean(voiceStatus.transcribe) : undefined}
@@ -1300,9 +1570,98 @@ function SpaceShell() {
                 }
               }}
             />
+              </div>
+            ) : null}
           </div>
-        ) : null}
+
+          {/* Right Split-Pane Side Branch (full height, zero overlap with Main Header or Composer) */}
+          {sideBranch && activeProject && activeSnapshot?.threadId ? (
+            <SideBranchPane
+              rpc={rpc}
+              projectId={activeProject.id}
+              branch={sideBranch}
+              activeBot={active}
+              initialFocusQuote={sideBranchFocusQuote}
+              onOpenModelSettings={() => openSettings("models")}
+              onRenameBranch={(nextName) => {
+                setSideBranch((prev) => (prev ? { ...prev, name: nextName } : prev));
+                setProjectBranches((prev) =>
+                  prev.map((b) => (b.id === sideBranch.id ? { ...b, name: nextName } : b)),
+                );
+              }}
+              onInjectIntoMain={async ({ mode, text, sourceBranchId }) => {
+                const mainBranch = projectBranches.find((b) => b.isMain) ?? projectBranches[0];
+                if (!mainBranch) return;
+                if (mode === "drop_block") {
+                  const placed = await rpc.placements.keepInMain({
+                    projectId: activeProject.id,
+                    sourceBranchId,
+                    targetBranchId: mainBranch.id,
+                    excerptText: text,
+                    label: sideBranch.name,
+                    anchorKind: "after_message",
+                    useInNextMessage: true,
+                    pinnedAsContext: true,
+                    clientNonce: crypto.randomUUID(),
+                  });
+                  setBranchPlacements((prev) => [...prev, placed]);
+                  toast.success("Dropped as Block in Main — drag or move Up/Down");
+                } else {
+                  const strategy = mode === "replace_spot" ? "replace" : "insert";
+                  const res = await rpc.merges.executeStrategy({
+                    projectId: activeProject.id,
+                    sourceBranchId,
+                    targetBranchId: mainBranch.id,
+                    strategy,
+                    selectedText: text,
+                    archiveAfterMerge: false,
+                    previewOnly: false,
+                  });
+                  if (res.receipt) {
+                    setMergeReceipts((prev) => [res.receipt!, ...prev]);
+                  }
+                  await refreshActiveThread();
+                  toast.success(
+                    strategy === "replace"
+                      ? "Replaced highlighted spot in Main (1-click Undo ready)"
+                      : "Inserted at branch spot in Main (1-click Undo ready)",
+                  );
+                }
+              }}
+              onOpenMergeReview={(latestText) => {
+                setMergeModalInitialText(latestText ?? "");
+                setMergeModalOpen(true);
+              }}
+              onClose={() => setSideBranch(null)}
+            />
+          ) : null}
+        </div>
       </main>
+
+      {sideBranch && activeProject ? (
+        <MergeBranchModal
+          open={mergeModalOpen}
+          onOpenChange={setMergeModalOpen}
+          rpc={rpc}
+          projectId={activeProject.id}
+          sourceBranch={sideBranch}
+          targetBranch={projectBranches.find((b) => b.isMain) ?? projectBranches[0] ?? sideBranch}
+          initialSelectedText={mergeModalInitialText}
+          onMerged={async ({ receipt, archivedBranchId, placement }) => {
+            if (receipt) setMergeReceipts((prev) => [receipt, ...prev]);
+            if (placement) setBranchPlacements((prev) => [...prev, placement]);
+            if (archivedBranchId) {
+              setSideBranch(null);
+              const refreshed = await rpc.branches
+                .list({ projectId: activeProject.id, includeArchived: true })
+                .catch(() => null);
+              if (refreshed) setProjectBranches(refreshed);
+            }
+            await refreshActiveThread();
+            toast.success("Merge committed to Main");
+          }}
+        />
+      ) : null}
 
       <PageViewHost />
       <CallCard onSettings={() => openSettings("voice")} />
@@ -1326,6 +1685,12 @@ function SpaceShell() {
         refreshBots={refreshBots}
         refreshGroupThread={refreshGroupThread}
         discardChatAttachments={composer.discardThreadAttachments}
+        activeProjectId={activeProject?.id ?? null}
+        activeBranchId={activeBranchId}
+        isBranch={Boolean(
+          activeBranchId &&
+            projectBranches.find((b) => b.id === activeBranchId)?.parentBranchId,
+        )}
         computerOpen={computerOpen}
         computerPanel={
           active ? (

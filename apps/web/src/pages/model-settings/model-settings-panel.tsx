@@ -1,5 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import type { ModelCredential, ModelSettings } from "@rakazo/contracts";
+import type { BillingRoute, ModelCredential, ModelSettings } from "@rakazo/contracts";
 import { MAX_MODEL_CONTEXT_WINDOW, MAX_MODEL_MAX_TOKENS } from "@rakazo/contracts";
 import type { ModelSettingsFields as Fields } from "@rakazo/core";
 import {
@@ -14,6 +14,7 @@ import { writeSaved } from "@rakazo/core/query";
 import { Button, ModelSettingsFields } from "@rakazo/ui-web";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { SubscriptionAuthCard } from "../../components/models/SubscriptionAuthCard";
 import type { ModelCatalogEntry } from "../../lib/models/model-auth";
 import { useSave, useSpaceQueries } from "../../lib/query/query";
 import { errorText } from "../../lib/query/user-error";
@@ -36,6 +37,9 @@ export function ModelSettingsPanel({
   const fields = edited ?? saved;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [activeRoute, setActiveRoute] = useState<BillingRoute>(
+    credential.accountId ? "subscription" : credential.hasKey ? "byok" : "hosted_credits",
+  );
   const queries = useSpaceQueries();
   const queryClient = useQueryClient();
   const persist = useSave({
@@ -107,6 +111,29 @@ export function ModelSettingsPanel({
           {notice}
         </p>
       ) : null}
+      <div className="mb-4">
+        <SubscriptionAuthCard
+          routes={[
+            {
+              provider,
+              label: `${provider} subscription`,
+              route: "subscription",
+              connected: Boolean(credential.accountId),
+            },
+            {
+              provider,
+              label: "API Key (BYOK)",
+              route: "byok",
+              connected: credential.hasKey,
+            },
+          ]}
+          activeRoute={activeRoute}
+          onSelectRoute={(route) => setActiveRoute(route)}
+          onConnectSubscription={() => {
+            setNotice(t`Use the provider OAuth flow in Connections to link your subscription.`);
+          }}
+        />
+      </div>
       <ModelSettingsFields
         disabled={pending}
         contextWindow={fields.contextWindow}
