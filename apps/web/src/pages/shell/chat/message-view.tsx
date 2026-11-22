@@ -17,6 +17,7 @@ import { memo, useCallback, useMemo, useState } from "react";
 import { A2uiSurfaceCard } from "../../../components/a2ui/A2uiSurfaceCard";
 import { CollaborationMarker } from "../../../components/ai/CollaborationMarker";
 import { BlockReviewCard } from "../../../components/branching/BlockReviewCard";
+import { SmartSegmentedMessage } from "../../../components/branching/SmartSegmentedMessage";
 import { ComputerCard } from "../../../components/computers/ComputerCard";
 import { ArtifactFileCard } from "../../../components/messages/ArtifactFileCard";
 import { AskCard } from "../../../components/messages/AskCard";
@@ -98,6 +99,7 @@ export const MessageView = memo(function MessageView({
   onBranch,
   reviewBlocksActive = false,
   onSaveBlockOrder,
+  onCommitMessageMarkdown,
   onBranchBlockText,
 }: {
   artifactTarget: ArtifactTarget;
@@ -158,6 +160,7 @@ export const MessageView = memo(function MessageView({
   onBranch?: (message: ThreadMessage) => void;
   reviewBlocksActive?: boolean;
   onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
+  onCommitMessageMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
   onBranchBlockText?: (message: ThreadMessage, blockText: string) => void;
 }) {
   const { t } = useLingui();
@@ -663,9 +666,27 @@ export const MessageView = memo(function MessageView({
                   dir="auto"
                 >
                   <div data-quote-message-id={quoteMessageId}>
-                    <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
-                      {block.text}
-                    </ChatMarkdown>
+                    {!isLive && onCommitMessageMarkdown ? (
+                      <SmartSegmentedMessage
+                        messageId={message.id}
+                        markdown={block.text}
+                        rpc={rpc}
+                        projectId={projectId}
+                        branchId={branchId}
+                        showOutlines={reviewBlocksActive}
+                        onBranchSegment={
+                          onBranchBlockText
+                            ? (quote) => onBranchBlockText(message, quote)
+                            : undefined
+                        }
+                        onCommitMarkdown={onCommitMessageMarkdown}
+                        onRestoredRevision={onRefresh}
+                      />
+                    ) : (
+                      <ChatMarkdown renderMention={renderMention} onOpenPage={openPage}>
+                        {block.text}
+                      </ChatMarkdown>
+                    )}
                   </div>
                   {voiceReady ? (
                     <Button

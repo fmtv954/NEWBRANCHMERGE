@@ -1,3 +1,4 @@
+import { ChatMarkdown } from "@rakazo/chat-ui/web";
 import {
   type Bot,
   type Branch,
@@ -5,7 +6,8 @@ import {
   CLONE_SYSTEM_PERSONAS,
   type ModelPersona,
 } from "@rakazo/contracts";
-import { Badge, Button, Card, Popover, PopoverContent, PopoverTrigger } from "@rakazo/ui-web";
+import { buildSmartSegments } from "@rakazo/core";
+import { Badge, Button, Card, Checkbox, Popover, PopoverContent, PopoverTrigger } from "@rakazo/ui-web";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -94,9 +96,20 @@ export function SideBranchPane({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [injectingKey, setInjectingKey] = useState<string | null>(null);
+  const [selectedSegments, setSelectedSegments] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
+
+  const selectedSegmentList = Object.values(selectedSegments);
+  function toggleSegmentSelection(segKey: string, markdown: string) {
+    setSelectedSegments((prev) => {
+      const next = { ...prev };
+      if (next[segKey]) delete next[segKey];
+      else next[segKey] = markdown;
+      return next;
+    });
+  }
 
   // Keep Side Chat defaulted to Main's active model when opening a fresh branch.
   useEffect(() => {
@@ -242,11 +255,21 @@ export function SideBranchPane({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => onOpenMergeReview(latestAssistantText)}
+            onClick={() => {
+              const picked =
+                selectedSegmentList.length > 0
+                  ? selectedSegmentList.join("\n\n")
+                  : latestAssistantText;
+              onOpenMergeReview(picked);
+            }}
             className="h-6 gap-1 px-2 text-[11px] text-success"
           >
             <GitMerge className="size-3" />
-            <span>Merge</span>
+            <span>
+              {selectedSegmentList.length > 0
+                ? `Merge (${selectedSegmentList.length})`
+                : "Merge"}
+            </span>
           </Button>
 
           <Button
@@ -308,7 +331,37 @@ export function SideBranchPane({
                     {msg.modelLabel}
                   </div>
                 ) : null}
-                <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                {msg.role === "assistant" ? (
+                  <div className="space-y-1.5">
+                    {buildSmartSegments(msg.text).map((seg, sIdx) => {
+                      const segKey = `${msg.id}:${seg.id}:${sIdx}`;
+                      const checked = Boolean(selectedSegments[segKey]);
+                      return (
+                        <div
+                          key={segKey}
+                          onClick={() => toggleSegmentSelection(segKey, seg.markdown)}
+                          className={`group/sseg flex cursor-pointer items-start gap-2 rounded-lg px-1.5 py-1 transition-colors ${
+                            checked
+                              ? "bg-success/15 ring-1 ring-success/50"
+                              : "hover:bg-muted/50"
+                          }`}
+                        >
+                          <Checkbox
+                            checked={checked}
+                            onCheckedChange={() => toggleSegmentSelection(segKey, seg.markdown)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="mt-1 shrink-0"
+                          />
+                          <div className="min-w-0 flex-1 text-xs leading-relaxed">
+                            <ChatMarkdown>{seg.markdown}</ChatMarkdown>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                )}
               </div>
 
               {msg.role === "assistant" ? (
@@ -398,6 +451,36 @@ export function SideBranchPane({
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
         <div ref={scrollEndRef} />
       </div>
+
+      {/* Sticky bar when specific segments are checked in Side Chat */}
+      {selectedSegmentList.length > 0 ? (
+        <div className="flex items-center justify-between gap-2 border-t border-success/40 bg-success/10 px-3.5 py-2 text-xs">
+          <span className="font-medium text-success">
+            {selectedSegmentList.length}{" "}
+            {selectedSegmentList.length === 1 ? "segment" : "segments"} selected
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setSelectedSegments({})}
+              className="h-6 px-2 text-[11px]"
+            >
+              Clear
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onOpenMergeReview(selectedSegmentList.join("\n\n"))}
+              className="h-6 gap-1 bg-success px-2.5 text-[11px] text-white hover:bg-success/90"
+            >
+              <GitMerge className="size-3" />
+              <span>Merge Selected</span>
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Embedded Unified Model Picker + Persona Picker + Side-Branch Composer */}
       <div className="border-t border-border bg-card/40 p-3">

@@ -31,6 +31,15 @@ export function projectsRoutes(ctx: RouterContext) {
       reorderMessageBlocks: authed.projects.reorderMessageBlocks.handler(({ context, input }) =>
         service.reorderMessageBlocks(context.actor, input),
       ),
+      updateMessageMarkdown: authed.projects.updateMessageMarkdown.handler(({ context, input }) =>
+        service.updateMessageMarkdown(context.actor, input),
+      ),
+      listMessageRevisions: authed.projects.listMessageRevisions.handler(({ context, input }) =>
+        service.listMessageRevisions(context.actor, input.messageId),
+      ),
+      restoreMessageRevision: authed.projects.restoreMessageRevision.handler(({ context, input }) =>
+        service.restoreMessageRevision(context.actor, input),
+      ),
     },
     branches: {
       list: authed.branches.list.handler(({ context, input }) =>

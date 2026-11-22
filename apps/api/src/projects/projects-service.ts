@@ -590,6 +590,124 @@ export function createProjectsService(prisma: PrismaClient) {
       });
     },
 
+    async updateMessageMarkdown(
+      actor: Actor,
+      input: {
+        projectId: string;
+        branchId: string;
+        messageId: string;
+        updatedMarkdown: string;
+        sourceAction?: "user_edit" | "merge_apply";
+        idempotencyKey: string;
+      },
+    ): Promise<{ revisionId: string; version: number; messageId: string; updatedMarkdown: string }> {
+      await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const message = await prisma.message.findFirst({
+        where: { id: input.messageId, thread: { spaceId: actor.spaceId } },
+        select: { id: true, blocks: true, activeRevisionId: true },
+      });
+      if (!message) {
+        throw new ORPCError("NOT_FOUND", { message: "Message not found" });
+      }
+      const blocks = Array.isArray(message.blocks)
+        ? (message.blocks as Array<Record<string, unknown>>)
+        : [];
+      const textIdx = blocks.findIndex((b) => b.kind === "text" && typeof b.text === "string");
+      const originalMarkdown = textIdx >= 0 ? String(blocks[textIdx]!.text) : "";
+      const nextBlocks = [...blocks];
+      if (textIdx >= 0) {
+        nextBlocks[textIdx] = { ...nextBlocks[textIdx], text: input.updatedMarkdown };
+      } else {
+        nextBlocks.unshift({ kind: "text", text: input.updatedMarkdown });
+      }
+
+      return prisma.$transaction(async (tx) => {
+        const latestMsgRev = await tx.messageRevision.findFirst({
+          where: { messageId: message.id },
+          orderBy: { version: "desc" },
+          select: { version: true },
+        });
+        let nextVersion = (latestMsgRev?.version ?? 0) + 1;
+        // Preserve original v1 snapshot before first mutation so user can always revert to v1!
+        if (!latestMsgRev) {
+          await tx.messageRevision.create({
+            data: {
+              messageId: message.id,
+              version: 1,
+              canonicalText: originalMarkdown,
+              blocksJson: blocks as object,
+              sourceAction: "original",
+            },
+          });
+          nextVersion = 2;
+        }
+        const msgRev = await tx.messageRevision.create({
+          data: {
+            messageId: message.id,
+            version: nextVersion,
+            canonicalText: input.updatedMarkdown,
+            blocksJson: nextBlocks as object,
+            sourceAction: input.sourceAction ?? "user_edit",
+          },
+        });
+        await tx.message.update({
+          where: { id: message.id },
+          data: { blocks: nextBlocks as object, activeRevisionId: msgRev.id },
+        });
+        return {
+          revisionId: msgRev.id,
+          version: msgRev.version,
+          messageId: message.id,
+          updatedMarkdown: input.updatedMarkdown,
+        };
+      });
+    },
+
+    async listMessageRevisions(actor: Actor, messageId: string) {
+      const message = await prisma.message.findFirst({
+        where: { id: messageId, thread: { spaceId: actor.spaceId } },
+        select: { id: true, activeRevisionId: true },
+      });
+      if (!message) throw new ORPCError("NOT_FOUND", { message: "Message not found" });
+      const rows = await prisma.messageRevision.findMany({
+        where: { messageId: message.id },
+        orderBy: { version: "desc" },
+        select: { id: true, version: true, canonicalText: true, sourceAction: true, createdAt: true },
+      });
+      return {
+        messageId: message.id,
+        activeRevisionId: message.activeRevisionId,
+        revisions: rows.map((r) => ({
+          id: r.id,
+          version: r.version,
+          canonicalText: r.canonicalText,
+          sourceAction: r.sourceAction,
+          createdAt: toIso(r.createdAt),
+        })),
+      };
+    },
+
+    async restoreMessageRevision(
+      actor: Actor,
+      input: { projectId: string; branchId: string; messageId: string; revisionId: string },
+    ) {
+      await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const rev = await prisma.messageRevision.findFirst({
+        where: { id: input.revisionId, messageId: input.messageId },
+      });
+      if (!rev) throw new ORPCError("NOT_FOUND", { message: "Revision not found" });
+      await prisma.message.update({
+        where: { id: input.messageId },
+        data: { blocks: rev.blocksJson as object, activeRevisionId: rev.id },
+      });
+      return {
+        revisionId: rev.id,
+        version: rev.version,
+        messageId: input.messageId,
+        updatedMarkdown: rev.canonicalText,
+      };
+    },
+
     async listBranches(
       actor: Actor,
       projectId: string,
@@ -1819,6 +1937,7 @@ export function createProjectsService(prisma: PrismaClient) {
         targetBranchId: string;
         strategy: "ai_assisted" | "replace" | "append" | "insert";
         selectedText: string;
+        finalAfterText?: string;
         instructions?: string;
         archiveAfterMerge: boolean;
         previewOnly: boolean;
@@ -1900,52 +2019,46 @@ export function createProjectsService(prisma: PrismaClient) {
         };
       }
 
-      // Apply mutation inside transaction
-      let createdPlacement: Placement | null = null;
+      // If the user manually dragged segments to an exact spot in Merge Preview, honor finalAfterText!
+      const committedText = input.finalAfterText?.trim() ? input.finalAfterText.trim() : afterText;
+
+      // Apply mutation uniformly into Main's actual Message.blocks + MessageRevision
+      // (zero separate green Kept box; automatically part of Main's live context window!).
       const result = await prisma.$transaction(async (tx) => {
-        if (input.strategy === "append") {
-          const maxSort = await tx.placement.aggregate({
-            where: { targetBranchId: targetBranch.id, removedAt: null },
-            _max: { sortOrder: true },
-          });
-          const pRow = await tx.placement.create({
-            data: {
-              projectId: input.projectId,
-              targetBranchId: targetBranch.id,
-              sourceBranchId: sourceBranch.id,
-              sourceMessageId: targetMsg?.id ?? null,
-              excerptText: incoming,
-              label: `Appended from ${sourceBranch.name}`,
-              anchorKind: "after_message",
-              anchorId: targetMsg?.id ?? null,
-              sortOrder: (maxSort._max.sortOrder ?? -1) + 1,
-              useInNextMessage: true,
-              pinnedAsContext: false,
-              originCreatedAt: new Date(),
-            },
-          });
-          createdPlacement = mapPlacement(pRow);
-        } else if (targetMsg) {
+        if (targetMsg) {
           const blocks = Array.isArray(targetMsg.blocks)
             ? (targetMsg.blocks as Array<Record<string, unknown>>)
             : [];
           const textIdx = blocks.findIndex((b) => b.kind === "text" && typeof b.text === "string");
           const nextBlocks = [...blocks];
           if (textIdx >= 0) {
-            nextBlocks[textIdx] = { ...nextBlocks[textIdx], text: afterText };
+            nextBlocks[textIdx] = { ...nextBlocks[textIdx], text: committedText };
           } else {
-            nextBlocks.unshift({ kind: "text", text: afterText });
+            nextBlocks.unshift({ kind: "text", text: committedText });
           }
           const latestMsgRev = await tx.messageRevision.findFirst({
             where: { messageId: targetMsg.id },
             orderBy: { version: "desc" },
             select: { version: true },
           });
+          let nextVersion = (latestMsgRev?.version ?? 0) + 1;
+          if (!latestMsgRev) {
+            await tx.messageRevision.create({
+              data: {
+                messageId: targetMsg.id,
+                version: 1,
+                canonicalText: beforeText,
+                blocksJson: blocks as object,
+                sourceAction: "original",
+              },
+            });
+            nextVersion = 2;
+          }
           const msgRev = await tx.messageRevision.create({
             data: {
               messageId: targetMsg.id,
-              version: (latestMsgRev?.version ?? 0) + 1,
-              canonicalText: afterText,
+              version: nextVersion,
+              canonicalText: committedText,
               blocksJson: nextBlocks as object,
               sourceAction: "merge_apply",
             },
@@ -2040,7 +2153,7 @@ export function createProjectsService(prisma: PrismaClient) {
           createdAt: toIso(result.receipt.createdAt),
         },
         archivedBranchId: result.archivedBranchId,
-        placement: createdPlacement,
+        placement: null,
       };
     },
   };

@@ -94,6 +94,59 @@ export const projectsRpc = {
           updatedMarkdown: z.string(),
         }),
       ),
+    updateMessageMarkdown: oc
+      .input(
+        z.object({
+          projectId: Id,
+          branchId: Id,
+          messageId: Id,
+          updatedMarkdown: z.string(),
+          sourceAction: z.enum(["user_edit", "merge_apply"]).default("user_edit"),
+          idempotencyKey: z.string().min(1).max(200),
+        }),
+      )
+      .output(
+        z.object({
+          revisionId: Id,
+          version: z.number().int().positive(),
+          messageId: Id,
+          updatedMarkdown: z.string(),
+        }),
+      ),
+    listMessageRevisions: oc
+      .input(z.object({ messageId: Id }))
+      .output(
+        z.object({
+          messageId: Id,
+          activeRevisionId: Id.nullable(),
+          revisions: z.array(
+            z.object({
+              id: Id,
+              version: z.number().int().positive(),
+              canonicalText: z.string(),
+              sourceAction: z.string(),
+              createdAt: z.string(),
+            }),
+          ),
+        }),
+      ),
+    restoreMessageRevision: oc
+      .input(
+        z.object({
+          projectId: Id,
+          branchId: Id,
+          messageId: Id,
+          revisionId: Id,
+        }),
+      )
+      .output(
+        z.object({
+          revisionId: Id,
+          version: z.number().int().positive(),
+          messageId: Id,
+          updatedMarkdown: z.string(),
+        }),
+      ),
   },
   branches: {
     list: oc
@@ -322,6 +375,7 @@ export const projectsRpc = {
           targetBranchId: Id,
           strategy: z.enum(["ai_assisted", "replace", "append", "insert"]),
           selectedText: z.string().min(1).max(40_000),
+          finalAfterText: z.string().max(80_000).optional(),
           instructions: z.string().max(4_000).optional(),
           archiveAfterMerge: z.boolean().default(false),
           previewOnly: z.boolean().default(false),

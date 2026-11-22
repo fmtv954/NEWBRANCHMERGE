@@ -1390,6 +1390,20 @@ function SpaceShell() {
                   await refreshActiveThread();
                   toast.success("Block order committed");
                 }}
+                onCommitMessageMarkdown={async (messageId, updatedMarkdown) => {
+                  const graph = await ensureGraphForActiveThread();
+                  if (!graph) return;
+                  await rpc.projects.updateMessageMarkdown({
+                    projectId: graph.project.id,
+                    branchId: graph.activeBranchId,
+                    messageId,
+                    updatedMarkdown,
+                    sourceAction: "user_edit",
+                    idempotencyKey: crypto.randomUUID(),
+                  });
+                  await refreshActiveThread();
+                  toast.success("Main canvas updated");
+                }}
                 onBranchCreated={async (createdBranchId) => {
                   if (!activeProject?.id) return;
                   const list = await rpc.branches
@@ -1592,41 +1606,32 @@ function SpaceShell() {
               onInjectIntoMain={async ({ mode, text, sourceBranchId }) => {
                 const mainBranch = projectBranches.find((b) => b.isMain) ?? projectBranches[0];
                 if (!mainBranch) return;
-                if (mode === "drop_block") {
-                  const placed = await rpc.placements.keepInMain({
-                    projectId: activeProject.id,
-                    sourceBranchId,
-                    targetBranchId: mainBranch.id,
-                    excerptText: text,
-                    label: sideBranch.name,
-                    anchorKind: "after_message",
-                    useInNextMessage: true,
-                    pinnedAsContext: true,
-                    clientNonce: crypto.randomUUID(),
-                  });
-                  setBranchPlacements((prev) => [...prev, placed]);
-                  toast.success("Dropped as Block in Main — drag or move Up/Down");
-                } else {
-                  const strategy = mode === "replace_spot" ? "replace" : "insert";
-                  const res = await rpc.merges.executeStrategy({
-                    projectId: activeProject.id,
-                    sourceBranchId,
-                    targetBranchId: mainBranch.id,
-                    strategy,
-                    selectedText: text,
-                    archiveAfterMerge: false,
-                    previewOnly: false,
-                  });
-                  if (res.receipt) {
-                    setMergeReceipts((prev) => [res.receipt!, ...prev]);
-                  }
-                  await refreshActiveThread();
-                  toast.success(
-                    strategy === "replace"
-                      ? "Replaced highlighted spot in Main (1-click Undo ready)"
-                      : "Inserted at branch spot in Main (1-click Undo ready)",
-                  );
+                const strategy =
+                  mode === "replace_spot"
+                    ? "replace"
+                    : mode === "drop_block"
+                      ? "append"
+                      : "insert";
+                const res = await rpc.merges.executeStrategy({
+                  projectId: activeProject.id,
+                  sourceBranchId,
+                  targetBranchId: mainBranch.id,
+                  strategy,
+                  selectedText: text,
+                  archiveAfterMerge: false,
+                  previewOnly: false,
+                });
+                if (res.receipt) {
+                  setMergeReceipts((prev) => [res.receipt!, ...prev]);
                 }
+                await refreshActiveThread();
+                toast.success(
+                  strategy === "replace"
+                    ? "Replaced highlighted spot uniformly in Main"
+                    : strategy === "append"
+                      ? "Appended uniformly into Main (hover any segment to drag/reorder)"
+                      : "Inserted uniformly at branch spot in Main",
+                );
               }}
               onOpenMergeReview={(latestText) => {
                 setMergeModalInitialText(latestText ?? "");

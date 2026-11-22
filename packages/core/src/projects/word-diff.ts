@@ -49,7 +49,7 @@ export function applySurgicalSelectionPatch(input: {
   return `${before}${input.replacementText}${after}`;
 }
 
-function formatBlockAsMarkdown(block: CanonicalBlock): string {
+export function formatBlockAsMarkdown(block: CanonicalBlock): string {
   if (block.blockType === "heading") return `## ${block.canonicalText}`;
   if (block.blockType === "blockquote") return `> ${block.canonicalText}`;
   if (block.blockType === "list_item") return `- ${block.canonicalText}`;
@@ -57,6 +57,47 @@ function formatBlockAsMarkdown(block: CanonicalBlock): string {
     return `\`\`\`${block.language ?? ""}\n${block.canonicalText}\n\`\`\``;
   }
   return block.canonicalText;
+}
+
+export interface SmartSegment {
+  id: string;
+  blockType: CanonicalBlock["blockType"];
+  markdown: string;
+  plainText: string;
+}
+
+/**
+ * Smart Segmentation: breaks any Markdown response into independently editable,
+ * draggable segments (headings, paragraphs, individual list items, code blocks, quotes)
+ * while preserving original Markdown formatting for uniform rendering.
+ */
+export function buildSmartSegments(markdown: string): SmartSegment[] {
+  const blocks = parseMarkdownToCanonicalBlocks(markdown);
+  if (blocks.length === 0) {
+    const trimmed = markdown.trim();
+    if (!trimmed) return [];
+    return [
+      {
+        id: "seg_0",
+        blockType: "paragraph",
+        markdown: trimmed,
+        plainText: trimmed,
+      },
+    ];
+  }
+  return blocks.map((block, idx) => ({
+    id: block.stableBlockId || `seg_${idx}`,
+    blockType: block.blockType,
+    markdown: formatBlockAsMarkdown(block),
+    plainText: block.canonicalText,
+  }));
+}
+
+export function joinSmartSegments(segments: ReadonlyArray<{ markdown: string }>): string {
+  return segments
+    .map((s) => s.markdown.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /**

@@ -139,6 +139,7 @@ export const Transcript = memo(function Transcript({
   onReorderPlacements,
   onRemovePlacement,
   onSaveBlockOrder,
+  onCommitMessageMarkdown,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   scrollRequest: { messageId: string; nonce: number } | null;
@@ -216,6 +217,7 @@ export const Transcript = memo(function Transcript({
   onReorderPlacements?: (orderedIds: string[]) => Promise<void>;
   onRemovePlacement?: (placementId: string) => Promise<void>;
   onSaveBlockOrder?: (messageId: string, orderedBlockIds: string[]) => Promise<void>;
+  onCommitMessageMarkdown?: (messageId: string, updatedMarkdown: string) => Promise<void>;
 }) {
   const { t } = useLingui();
   const [branchSetupOpen, setBranchSetupOpen] = useState(false);
@@ -759,6 +761,7 @@ export const Transcript = memo(function Transcript({
                       }
                       reviewBlocksActive={reviewBlocksOpen}
                       onSaveBlockOrder={onSaveBlockOrder}
+                      onCommitMessageMarkdown={onCommitMessageMarkdown}
                       onBranchBlockText={
                         onInstantBranch
                           ? (msg, blockText) =>
