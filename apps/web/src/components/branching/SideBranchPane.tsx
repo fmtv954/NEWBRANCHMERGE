@@ -5,7 +5,7 @@ import {
   CLONE_SYSTEM_PERSONAS,
   type ModelPersona,
 } from "@rakazo/contracts";
-import { Badge, Button, Card } from "@rakazo/ui-web";
+import { Badge, Button, Card, Popover, PopoverContent, PopoverTrigger } from "@rakazo/ui-web";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -15,6 +15,7 @@ import {
   GitMerge,
   Loader2,
   Pencil,
+  SlidersHorizontal,
   Sparkles,
   X,
 } from "lucide-react";
@@ -84,6 +85,10 @@ export function SideBranchPane({
     return defaultMainModelKey;
   });
   const [activePersona, setActivePersona] = useState<ModelPersona>(CLONE_SYSTEM_PERSONAS[0]!);
+  const [responseStyle, setResponseStyle] = useState<"direct" | "balanced" | "deep">("direct");
+  const [customTemp, setCustomTemp] = useState<number | null>(null);
+  const [customMaxTokens, setCustomMaxTokens] = useState<number | null>(null);
+  const [paramsOpen, setParamsOpen] = useState(false);
   const [messages, setMessages] = useState<SideBranchMessage[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [draft, setDraft] = useState("");
@@ -166,6 +171,9 @@ export function SideBranchPane({
         focusQuote: focusQuote ?? undefined,
         personaId: activePersona.id !== "default" ? activePersona.id : undefined,
         personaPrompt: activePersona.systemPrompt || undefined,
+        responseStyle,
+        temperature: customTemp ?? undefined,
+        maxTokens: customMaxTokens ?? undefined,
       });
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempId),
@@ -404,9 +412,107 @@ export function SideBranchPane({
             selectedPersonaId={activePersona.id}
             onSelectPersona={setActivePersona}
           />
-          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-            Isolated side thread
-          </span>
+          <button
+            type="button"
+            onClick={() =>
+              setResponseStyle((s) =>
+                s === "direct" ? "balanced" : s === "balanced" ? "deep" : "direct",
+              )
+            }
+            title="Response depth (click to cycle Direct / Balanced / Deep)"
+            className="inline-flex h-7 items-center rounded-lg border border-border bg-card px-2 text-[10px] font-medium capitalize text-foreground hover:bg-muted"
+          >
+            {responseStyle}
+          </button>
+          <Popover open={paramsOpen} onOpenChange={setParamsOpen}>
+            <PopoverTrigger
+              render={
+                <button
+                  type="button"
+                  title="Custom model parameters (Temperature & Max Tokens)"
+                  aria-label="Model parameters"
+                  className={`inline-flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground ${
+                    customTemp !== null || customMaxTokens !== null ? "border-success/60 text-success" : ""
+                  }`}
+                />
+              }
+            >
+              <SlidersHorizontal className="size-3.5" />
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              side="top"
+              sideOffset={8}
+              className="w-64 space-y-3 rounded-xl border border-border bg-popover p-3 shadow-xl"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-foreground">Branch Parameters</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomTemp(null);
+                    setCustomMaxTokens(null);
+                  }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  Reset to Auto
+                </button>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-muted-foreground">Temperature</span>
+                  <span className="font-mono text-foreground">
+                    {customTemp !== null
+                      ? customTemp.toFixed(2)
+                      : responseStyle === "direct"
+                        ? "Auto (0.25)"
+                        : responseStyle === "balanced"
+                          ? "Auto (0.50)"
+                          : "Auto (0.70)"}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1.5}
+                  step={0.05}
+                  value={
+                    customTemp ??
+                    (responseStyle === "direct" ? 0.25 : responseStyle === "balanced" ? 0.5 : 0.7)
+                  }
+                  onChange={(e) => setCustomTemp(Number(e.target.value))}
+                  className="w-full accent-success"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-muted-foreground">Max Tokens</span>
+                  <span className="font-mono text-foreground">
+                    {customMaxTokens !== null
+                      ? customMaxTokens
+                      : responseStyle === "direct"
+                        ? "Auto (320)"
+                        : responseStyle === "balanced"
+                          ? "Auto (900)"
+                          : "Auto (2400)"}
+                  </span>
+                </div>
+                <input
+                  type="number"
+                  min={64}
+                  max={8192}
+                  step={64}
+                  placeholder="Auto"
+                  value={customMaxTokens ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    setCustomMaxTokens(v ? Math.max(64, Math.min(8192, Number(v))) : null);
+                  }}
+                  className="h-7 w-full rounded-lg border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-ring"
+                />
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
 
         <div className="flex items-end gap-2 rounded-xl border border-border bg-background px-2.5 py-2 focus-within:border-ring">

@@ -1612,6 +1612,9 @@ export function createProjectsService(prisma: PrismaClient) {
         focusQuote?: string;
         personaId?: string;
         personaPrompt?: string;
+        responseStyle?: "direct" | "balanced" | "deep";
+        temperature?: number;
+        maxTokens?: number;
       },
     ) {
       const branch = await prisma.branch.findUnique({
@@ -1645,46 +1648,86 @@ export function createProjectsService(prisma: PrismaClient) {
         select: { id: true, createdAt: true },
       });
 
-      // Assemble LLM context based on persona + contextMode.
+      // Assemble LLM context based on persona, responseStyle, and delimited read-only Main context.
+      const responseStyle = input.responseStyle ?? "direct";
+      const styleDefaults =
+        responseStyle === "direct"
+          ? {
+              temperature: 0.25,
+              maxTokens: 320,
+              instruction:
+                "Response style: DIRECT. Lead immediately with the exact answer in 1-3 crisp sentences (or short bullets only if multiple items were requested). Zero preamble, zero filler, zero recap.",
+            }
+          : responseStyle === "balanced"
+            ? {
+                temperature: 0.5,
+                maxTokens: 900,
+                instruction:
+                  "Response style: BALANCED. Give a clear, focused answer with only essential supporting context. Do not recap Main.",
+              }
+            : {
+                temperature: 0.7,
+                maxTokens: 2400,
+                instruction:
+                  "Response style: DEEP. Provide a thorough, structured breakdown of the requested sub-topic without repeating content already in Main.",
+              };
+
       const llmMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
       const personaPrefix = input.personaPrompt?.trim()
         ? `${input.personaPrompt.trim()}\n\n`
         : "";
-      if (input.contextMode === "only_selection" && focusQuote) {
-        llmMessages.push({
-          role: "system",
-          content: `${personaPrefix}You are answering a focused 1-on-1 side-branch question. Focus ONLY on this excerpt from the Main conversation:\n\n"${focusQuote}"\n\nBe concise, direct, and ready to be injected back into the Main conversation.`,
-        });
-      } else {
-        llmMessages.push({
-          role: "system",
-          content: focusQuote
-            ? `${personaPrefix}You are answering a 1-on-1 side-branch question with full Main conversation context. Pay special attention to this highlighted excerpt:\n\n"${focusQuote}"\n\nBe concise, clear, and ready to be merged or injected back into Main.`
-            : `${personaPrefix}You are answering a 1-on-1 side-branch question with Main conversation context. Be concise and helpful.`,
-        });
+      const antiRepeatRules = [
+        "You are answering a focused 1-on-1 side-branch question.",
+        focusQuote
+          ? `The user highlighted this specific subject/excerpt from Main: "${focusQuote}".`
+          : "",
+        "STRICT RULES:",
+        "1. Answer ONLY the user's exact question directly.",
+        "2. NEVER repeat, summarize, re-explain, or rewrite background information already covered in Main unless the user explicitly asks you to rewrite it.",
+        "3. Use any Main context strictly as silent read-only reference to resolve pronouns/entities (e.g. 'he', 'this', 'that term').",
+        styleDefaults.instruction,
+      ]
+        .filter(Boolean)
+        .join("\n");
 
-        if (input.contextMode === "through_message" && branch.forkOrigin?.sourceBranchId) {
-          const parentBranch = await prisma.branch.findUnique({
-            where: { id: branch.forkOrigin.sourceBranchId },
-            select: { threadId: true },
+      llmMessages.push({
+        role: "system",
+        content: `${personaPrefix}${antiRepeatRules}`,
+      });
+
+      // Wrap inherited Main history in a single clearly delimited read-only reference block
+      // so the model resolves pronouns without mimicking Main's essay structure.
+      if (input.contextMode === "through_message" && branch.forkOrigin?.sourceBranchId) {
+        const parentBranch = await prisma.branch.findUnique({
+          where: { id: branch.forkOrigin.sourceBranchId },
+          select: { threadId: true },
+        });
+        if (parentBranch) {
+          const parentMsgs = await prisma.message.findMany({
+            where: {
+              threadId: parentBranch.threadId,
+              ...(branch.forkOrigin.inheritedUpToSeq > 0
+                ? { seq: { lte: branch.forkOrigin.inheritedUpToSeq } }
+                : {}),
+            },
+            orderBy: { seq: "asc" },
+            take: 16,
+            select: { role: true, blocks: true },
           });
-          if (parentBranch) {
-            const parentMsgs = await prisma.message.findMany({
-              where: {
-                threadId: parentBranch.threadId,
-                ...(branch.forkOrigin.inheritedUpToSeq > 0
-                  ? { seq: { lte: branch.forkOrigin.inheritedUpToSeq } }
-                  : {}),
-              },
-              orderBy: { seq: "asc" },
-              take: 24,
-              select: { role: true, blocks: true },
-            });
-            for (const pm of parentMsgs) {
-              if (pm.role !== "user" && pm.role !== "assistant") continue;
-              const txt = extractTextFromBlocks(pm.blocks);
-              if (txt) llmMessages.push({ role: pm.role, content: txt });
+          const refLines: string[] = [];
+          for (const pm of parentMsgs) {
+            if (pm.role !== "user" && pm.role !== "assistant") continue;
+            const txt = extractTextFromBlocks(pm.blocks);
+            if (txt) {
+              const trimmed = txt.length > 1600 ? `${txt.slice(0, 1600)}…` : txt;
+              refLines.push(`[${pm.role.toUpperCase()}]: ${trimmed}`);
             }
+          }
+          if (refLines.length > 0) {
+            llmMessages.push({
+              role: "system",
+              content: `<main_context_reference_only>\nDo NOT repeat or rewrite this background text. Use it only to understand what the user is referring to.\n\n${refLines.join("\n\n")}\n</main_context_reference_only>`,
+            });
           }
         }
       }
@@ -1707,6 +1750,8 @@ export function createProjectsService(prisma: PrismaClient) {
         provider: input.provider,
         modelId: input.modelId,
         messages: llmMessages,
+        temperature: input.temperature ?? styleDefaults.temperature,
+        maxTokens: input.maxTokens ?? styleDefaults.maxTokens,
       });
 
       const assistantRow = await prisma.message.create({
@@ -2013,6 +2058,8 @@ async function callBranchCompletion(input: {
   provider: string;
   modelId: string;
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  temperature?: number;
+  maxTokens?: number;
 }): Promise<{ text: string; modelLabel: string }> {
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
   const xaiKey = process.env.XAI_API_KEY?.trim();
@@ -2090,7 +2137,8 @@ async function callBranchCompletion(input: {
         body: JSON.stringify({
           model: attempt.model,
           messages: input.messages,
-          temperature: 0.7,
+          temperature: input.temperature ?? 0.3,
+          ...(input.maxTokens ? { max_tokens: input.maxTokens } : {}),
         }),
       });
       if (!resp.ok) {

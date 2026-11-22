@@ -192,6 +192,9 @@ export const projectsRpc = {
           focusQuote: z.string().max(12_000).optional(),
           personaId: z.string().max(100).optional(),
           personaPrompt: z.string().max(8_000).optional(),
+          responseStyle: z.enum(["direct", "balanced", "deep"]).default("direct"),
+          temperature: z.number().min(0).max(2).optional(),
+          maxTokens: z.number().int().min(64).max(8_192).optional(),
         }),
       )
       .output(
