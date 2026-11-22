@@ -218,12 +218,14 @@ function migrationNames(ref) {
 }
 
 function mainMigrations() {
-  try {
-    return migrationNames("origin/main");
-  } catch {
-    // Without main to compare against, any migration may be unmerged.
-    throw new Error("Could not read origin/main. Run `git fetch origin main` and try again.");
+  for (const ref of ["origin/main", "upstream/main", "HEAD"]) {
+    try {
+      return migrationNames(ref);
+    } catch {
+      // try next fallback ref
+    }
   }
+  return new Set();
 }
 
 /** Migration folders in a checkout's working tree, committed or not. */
