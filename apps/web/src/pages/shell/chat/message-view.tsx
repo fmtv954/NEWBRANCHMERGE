@@ -349,11 +349,11 @@ export const MessageView = memo(function MessageView({
     return (
       <>
         {messageContext}
-        <div className="relative w-fit max-w-full has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full">
-          <div className="flex w-fit max-w-full justify-start has-data-[canvas-editing]:w-full [@media(hover:none)]:w-full">
+        <div className="relative w-full max-w-full">
+          <div className="flex w-full max-w-full justify-start">
             <div
               data-testid="message-bot-bubble"
-              className="max-w-full space-y-2.5 rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground has-data-[canvas-editing]:w-full"
+              className="w-full max-w-full space-y-2.5 border-0 bg-transparent p-0 text-body-lg text-foreground shadow-none"
               dir="auto"
             >
               {visibleNarrationBlocks.map((block, i) => {
@@ -513,7 +513,7 @@ export const MessageView = memo(function MessageView({
               >
                 <div
                   data-testid="message-bot-bubble"
-                  className="max-w-full rounded-2xl bg-muted px-[18px] py-3 text-body-lg text-foreground"
+                  className="w-full max-w-full border-0 bg-transparent p-0 text-body-lg text-foreground shadow-none"
                   dir="auto"
                 >
                   <ChatMarkdown streaming renderMention={renderMention} onOpenPage={openPage}>

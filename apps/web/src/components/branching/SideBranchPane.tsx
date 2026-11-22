@@ -363,7 +363,7 @@ export function SideBranchPane({
       {focusQuote ? (
         <div className="border-b border-border/70 bg-muted/40 px-3.5 py-2 text-xs">
           <p className="max-h-28 overflow-auto border-l-2 border-success/60 pl-2 text-foreground/90">
-            “{focusQuote}”
+            “{focusQuote.replace(/[*_`~]/g, "")}”
           </p>
         </div>
       ) : null}

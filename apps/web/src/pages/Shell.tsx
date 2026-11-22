@@ -297,8 +297,13 @@ function SpaceShell() {
 
   function autoBranchName(quoteText?: string): string {
     if (quoteText && quoteText.trim()) {
-      const words = quoteText.trim().split(/\s+/).slice(0, 5).join(" ");
-      return `BRANCH - ${words}${quoteText.trim().split(/\s+/).length > 5 ? "…" : ""}`;
+      const clean = quoteText
+        .replace(/[*_`~#>]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const parts = clean.split(" ");
+      const words = parts.slice(0, 5).join(" ");
+      return `BRANCH - ${words}${parts.length > 5 ? "…" : ""}`;
     }
     const chatTitle = active?.name ?? activeGroup?.name ?? "Chat";
     const version = projectBranches.filter((b) => !b.isMain).length + 2;
