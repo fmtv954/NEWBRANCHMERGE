@@ -350,9 +350,8 @@ export function botsRoutes(ctx: RouterContext) {
         // Older apps always send Original, which would pin every new bot to it.
         const { avatarSet: _ignored, ...request } = input;
         const bot = await repos.createBot(context.actor, request);
-        await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
-          getLogger().error("bot intro run enqueue", error);
-        });
+        // Intentionally skip enqueueBotIntroRun: new bots start on a clean empty canvas
+        // with zero welcome question-card and zero background LLM token burn.
         return bot;
       }),
       importPreview: authed.bots.importPreview.handler(async ({ context, input }) =>
