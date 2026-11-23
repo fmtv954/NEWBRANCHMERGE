@@ -47,7 +47,7 @@ export interface RunExecutorServices extends Omit<RunProviders, "cloudAgent"> {
   executorDeps: ExecutorDeps;
   contextStrategy: AgentContextStrategy;
   resolveConnectedModel: (
-    ...args: Parameters<typeof resolveConnectedRunModel> extends [ExecutorDeps, ...infer Rest]
+    ...args: Parameters<typeof resolveConnectedRunModel> extends [unknown, ...infer Rest]
       ? Rest
       : never
   ) => ReturnType<typeof resolveConnectedRunModel>;

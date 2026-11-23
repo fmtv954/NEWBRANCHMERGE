@@ -86,7 +86,7 @@ export function MergeBranchModal({
   const [strategy, setStrategy] = useState<MergeStrategy>("insert_after");
   const [selectedText, setSelectedText] = useState(initialSelectedText);
   const [instructions, setInstructions] = useState("");
-  const [archiveAfterMerge, setArchiveAfterMerge] = useState(true);
+  const [archiveAfterMerge, setArchiveAfterMerge] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [compare, setCompare] = useState(false);
@@ -260,7 +260,7 @@ export function MergeBranchModal({
             {selectedBlocks?.length ? (
               <div className="space-y-2">
                 <h3 className="text-sm font-medium">Selected blocks ({selectedBlocks.length})</h3>
-                <ol className="space-y-2">
+                <ol className="list-decimal space-y-2 pl-6">
                   {selectedBlocks.map((block) => (
                     <li
                       key={block.blockId}

@@ -1,9 +1,19 @@
+import { createProjectCompletion } from "../projects/project-completion.js";
 import { createProjectsService } from "../projects/projects-service.js";
 import type { RouterContext } from "./context.js";
 
 export function projectsRoutes(ctx: RouterContext) {
   const { deps, authed } = ctx;
-  const service = createProjectsService(deps.prisma);
+  const service = createProjectsService(
+    deps.prisma,
+    createProjectCompletion({
+      prisma: deps.prisma,
+      secretStore: deps.secrets,
+      codexCatalog: ctx.codexCatalog,
+      billingEnabled: deps.billing?.modelCreditsEnabled,
+      mcpAllowPrivateEndpoint: deps.env.mcpAllowPrivateEndpoint,
+    }),
+  );
 
   return {
     projects: {
@@ -65,6 +75,12 @@ export function projectsRoutes(ctx: RouterContext) {
       ),
       send: authed.branches.send.handler(({ context, input }) =>
         service.sendBranchMessage(context.actor, input),
+      ),
+      regenerationDefaults: authed.branches.regenerationDefaults.handler(({ context, input }) =>
+        service.regenerationDefaults(context.actor, input),
+      ),
+      regenerate: authed.branches.regenerate.handler(({ context, input }) =>
+        service.regenerate(context.actor, input),
       ),
       rename: authed.branches.rename.handler(({ context, input }) =>
         service.renameBranch(context.actor, input),

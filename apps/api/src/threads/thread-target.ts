@@ -501,6 +501,7 @@ export async function sendThreadMessage(
   target: ThreadTarget,
   input: {
     text?: string;
+    personaPrompt?: string;
     artifactIds?: string[];
     imageHandling?: "confirm" | "file";
     mentions?: MentionTargetInput[];
@@ -801,7 +802,11 @@ export async function sendThreadMessage(
             botId: target.botId,
             threadId: target.threadId,
             userId: actor.userId,
-            prompt: buildSendPrompt(input.text, artifacts, connectorNames),
+            prompt: [
+              input.personaPrompt?.trim() ? `Use this model persona for this reply:
+${input.personaPrompt.trim()}` : "",
+              buildSendPrompt(input.text, artifacts, connectorNames),
+            ].filter(Boolean).join("\n\n"),
             status: "queued",
           },
         });

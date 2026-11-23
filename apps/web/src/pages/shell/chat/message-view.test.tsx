@@ -55,15 +55,16 @@ type PeerBot = ComponentProps<typeof MessageView>["peerBot"];
 const missingBot: PeerBot = () => undefined;
 const existingBot: PeerBot = () => ({ color: "orange" });
 
-it("offers inline canvas editing on a settled assistant reply", () => {
+it("offers the insert menu on an editable assistant reply", () => {
   renderView("bot", [{ kind: "text", text: "A completed reply." }], {
     onCommitMessageMarkdown: vi.fn(),
   });
+  expect(container.querySelector('[contenteditable="true"]')?.textContent).toContain(
+    "A completed reply.",
+  );
   expect(
-    Array.from(container.querySelectorAll("button")).some(
-      (button) => button.textContent === "Edit blocks",
-    ),
-  ).toBe(true);
+    Array.from(container.querySelectorAll("button"), (button) => button.textContent),
+  ).toContain("Insert block");
 });
 
 const planner = (status: "created" | "archived" | "deleted" = "created") => ({

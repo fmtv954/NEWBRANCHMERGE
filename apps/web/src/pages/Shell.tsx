@@ -6,6 +6,7 @@ import type {
   MergeReceipt,
   MergeReview,
   MergeSourceBlock,
+  ModelPersona,
   Placement,
   Project,
   SpaceMemoryConfig,
@@ -46,8 +47,13 @@ import {
 } from "react";
 import { useParams } from "react-router-dom";
 import { CallCard, CallReturnBar } from "../components/call/CallCard";
+import type { BranchCompareSource } from "../components/branching/branch-selection";
+import { PersonaPicker } from "../components/branching/PersonaPicker";
+import type { RegenerateTarget } from "../components/branching/RegenerateReplyDialog";
+import { RegenerateReplyDialog } from "../components/branching/RegenerateReplyDialog";
 import { CompareModelsArena } from "../components/branching/CompareModelsArena";
 import { MergeBranchModal } from "../components/branching/MergeBranchModal";
+import type { SideBranchPaneHandle } from "../components/branching/SideBranchPane";
 import { SideBranchPane } from "../components/branching/SideBranchPane";
 import { IncomingCall } from "../components/call/IncomingCall";
 import { ComputerUpdateProgress } from "../components/computers/ComputerUpdateProgress";
@@ -244,7 +250,11 @@ function SpaceShell() {
     markdown: string;
     originalMarkdown?: string;
   } | null>(null);
-  const [compareArenaOpen, setCompareArenaOpen] = useState(false);
+  const [compareSource, setCompareSource] = useState<BranchCompareSource>();
+  const [regenerateTarget, setRegenerateTarget] = useState<RegenerateTarget>();
+  const [mainPersonas, setMainPersonas] = useState<Record<string, ModelPersona>>({});
+  const [selectionReset, setSelectionReset] = useState(0);
+  const sideBranchPane = useRef<SideBranchPaneHandle>(null);
   const [reviewBlocksOpen, setReviewBlocksOpen] = useState(false);
   const [branchPlacements, setBranchPlacements] = useState<Placement[]>([]);
   const [activeMergeReview, setActiveMergeReview] = useState<MergeReview | null>(null);
@@ -780,8 +790,13 @@ function SpaceShell() {
       ? snapshot
       : null;
 
+  const personaThread = activeSnapshot?.threadId;
+  const mainPersona = personaThread ? mainPersonas[personaThread] : undefined;
+
   useEffect(() => {
     const threadId = activeSnapshot?.threadId;
+    setCompareSource(undefined);
+    setRegenerateTarget(undefined);
     // Immediately clear stale branch, side-chat, and receipt state on every thread switch
     setSideBranch(null);
     setSideBranchFocusQuote(null);
@@ -947,6 +962,7 @@ function SpaceShell() {
   const { computerBot, openComputer } = computerControls;
   const composer = useComposerActions({
     rpc,
+    personaPrompt: mainPersona?.systemPrompt || undefined,
     pageSession: pages.session,
     activeId: active?.id,
     inGroup,
@@ -1380,10 +1396,7 @@ function SpaceShell() {
                 setSideBranch(picked && !picked.isMain ? picked : null);
               }}
               onCreateBranch={() => void handleInstantBranch({})}
-              onMergeBranch={() => {
-                if (!sideBranch) return;
-                setMergeModalOpen(true);
-              }}
+              onMergeBranch={() => sideBranchPane.current?.openMergeReview()}
               splitViewOpen={Boolean(sideBranch)}
               onToggleSplitView={() => {
                 if (sideBranch) {
@@ -1444,24 +1457,14 @@ function SpaceShell() {
                   setMergeModalOpen(true);
                 }}
                 onRegenerateMessage={async (targetMsg) => {
-                  if (!active?.id) return;
-                  const msgs = activeSnapshot?.messages ?? [];
-                  const idx = msgs.findIndex((m) => m.id === targetMsg.id);
-                  const prevUser = [...msgs.slice(0, idx >= 0 ? idx : msgs.length)]
-                    .reverse()
-                    .find((m) => m.role === "user");
-                  const promptText = prevUser?.blocks
-                    .filter((b) => b.kind === "text" && "text" in b)
-                    .map((b) => ("text" in b ? b.text : ""))
-                    .join("\n\n")
-                    .trim();
-                  if (!promptText) return;
-                  await rpc.threads.send({
-                    botId: active.id,
-                    text: promptText,
-                    clientNonce: crypto.randomUUID(),
-                  });
-                  await refreshActiveThread();
+                  try {
+                    const graph = await ensureGraphForActiveThread();
+                    const branch = graph?.branches.find((branch) => branch.threadId === targetMsg.threadId);
+                    if (!branch) throw new Error("Could not find the branch for this reply.");
+                    setRegenerateTarget({ branchId: branch.id, messageId: targetMsg.id });
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : "Could not open regeneration.");
+                  }
                 }}
                 onDismissMergeReceipt={(receiptId) => {
                   setMergeReceipts((prev) => prev.filter((r) => r.id !== receiptId));
@@ -1536,19 +1539,30 @@ function SpaceShell() {
               enterToSend={enterToSend}
               sendColors={userBubble}
               modelPicker={
-                showComposerModel && active && !inGroup ? (
-                  <ComposerModelPicker
-                    bot={active}
-                    disabled={Boolean(recordingSkill)}
-                    activeMediaModel={activeMediaModel}
-                    onSelectMediaModel={setActiveMediaModel}
-                    onConnect={() => openSettings("models")}
-                    onSaved={(updated) =>
-                      setBots((current) =>
-                        current.map((bot) => (bot.id === updated.id ? updated : bot)),
-                      )
-                    }
-                  />
+                active && !inGroup && (personaThread || showComposerModel) ? (
+                  <div className="flex min-w-0 items-center gap-2">
+                    {personaThread ? (
+                      <PersonaPicker
+                        selectedPersonaId={mainPersona?.id ?? "default"}
+                        onSelectPersona={(persona) =>
+                          setMainPersonas((current) => ({ ...current, [personaThread]: persona }))}
+                      />
+                    ) : null}
+                    {showComposerModel ? (
+                      <ComposerModelPicker
+                        bot={active}
+                        disabled={Boolean(recordingSkill)}
+                        activeMediaModel={activeMediaModel}
+                        onSelectMediaModel={setActiveMediaModel}
+                        onConnect={() => openSettings("models")}
+                        onSaved={(updated) =>
+                          setBots((current) =>
+                            current.map((bot) => (bot.id === updated.id ? updated : bot)),
+                          )
+                        }
+                      />
+                    ) : null}
+                  </div>
                 ) : undefined
               }
               activeName={
@@ -1653,6 +1667,7 @@ function SpaceShell() {
           {/* Right Split-Pane Side Branch (full height, zero overlap with Main Header or Composer) */}
           {sideBranch && activeProject && activeSnapshot?.threadId ? (
             <SideBranchPane
+              ref={sideBranchPane}
               key={sideBranch.id}
               rpc={rpc}
               branch={sideBranch}
@@ -1687,7 +1702,9 @@ function SpaceShell() {
                 if (res.receipt) {
                   setMergeReceipts([res.receipt]);
                 }
-                await refreshActiveThread();
+                await refreshActiveThread().catch(() => {
+                  toast.error("The merge was saved. Could not refresh Main.");
+                });
                 toast.success(
                   strategy === "replace"
                     ? "Replaced highlighted text in Main"
@@ -1700,8 +1717,18 @@ function SpaceShell() {
                 setMergeSelection({ text: text ?? "", blocks });
                 setMergeModalOpen(true);
               }}
-              onOpenCompareArena={() => setCompareArenaOpen(true)}
-              onClose={() => setSideBranch(null)}
+              selectionReset={selectionReset}
+              onRestoreBranch={async () => {
+                try {
+                  const restored = await rpc.branches.archive({ branchId: sideBranch.id, archived: false });
+                  setSideBranch((current) => current?.id === restored.id ? restored : current);
+                  setProjectBranches((current) => current.map((branch) => branch.id === restored.id ? restored : branch));
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : "Could not restore the branch.");
+                }
+              }}
+              onOpenCompareArena={setCompareSource}
+              onClose={() => { setSideBranch(null); setCompareSource(undefined); }}
             />
           ) : null}
         </div>
@@ -1724,6 +1751,8 @@ function SpaceShell() {
           onSavedStandalone={saveCanvasMarkdown}
           onMerged={async ({ receipt, archivedBranchId }) => {
             if (receipt) setMergeReceipts([receipt]);
+            setSelectionReset((current) => current + 1);
+            setMergeSelection({ text: "" });
             if (archivedBranchId) {
               setSideBranch(null);
               const refreshed = await rpc.branches
@@ -1731,73 +1760,43 @@ function SpaceShell() {
                 .catch(() => null);
               if (refreshed) setProjectBranches(refreshed);
             }
-            await refreshActiveThread();
+            await refreshActiveThread().catch(() => {
+              toast.error("The merge was saved. Could not refresh Main.");
+            });
             toast.success("Merged into Main");
           }}
         />
       ) : null}
 
-      <CompareModelsArena
-        open={compareArenaOpen}
-        onOpenChange={setCompareArenaOpen}
-        rpc={rpc}
-        activeBot={active}
-        threadId={activeSnapshot?.threadId}
-        onOpenStudio={() => setPanel("microdrama-studio")}
-        onUseWinnerText={async (text) => {
-          const latestAssistant = [...(activeSnapshot?.messages ?? [])]
-            .reverse()
-            .find((m) => m.role === "bot");
-          if (latestAssistant) {
-            const graph = await ensureGraphForActiveThread();
-            if (graph) {
-              const existing = latestAssistant.blocks
-                .filter((b) => b.kind === "text" && "text" in b)
-                .map((b) => ("text" in b ? b.text : ""))
-                .join("\n\n");
-              await rpc.projects.updateMessageMarkdown({
-                projectId: graph.project.id,
-                branchId: graph.activeBranchId,
-                messageId: latestAssistant.id,
-                updatedMarkdown: existing ? `${existing}\n\n${text}` : text,
-                sourceAction: "merge_apply",
-                idempotencyKey: crypto.randomUUID(),
-              });
-              await refreshActiveThread();
-              toast.success("Winner added uniformly to Main");
-              return;
-            }
-          }
-          if (active?.id) {
-            await rpc.threads.send({
-              botId: active.id,
-              text,
-              clientNonce: crypto.randomUUID(),
-            });
-            await refreshActiveThread();
-            toast.success("Winner sent to Main");
-          }
-        }}
-        onAssembleInCanvas={(combinedMarkdown) => {
-          const latestAssistant = [...(activeSnapshot?.messages ?? [])]
-            .reverse()
-            .find((m) => m.role === "bot");
-          if (latestAssistant) {
-            const blockIndex = latestAssistant.blocks.findIndex((block) => block.kind === "text");
-            const block = latestAssistant.blocks[blockIndex];
-            if (block?.kind !== "text") return;
-            setStandaloneCanvasMessage({
-              messageId: latestAssistant.id,
-              blockIndex,
-              markdown: combinedMarkdown,
-              originalMarkdown: block.text,
-            });
+      {compareSource && sideBranch?.id === compareSource.branchId ? (
+        <CompareModelsArena
+          open
+          onOpenChange={(open) => { if (!open) setCompareSource(undefined); }}
+          rpc={rpc}
+          activeBot={active}
+          threadId={sideBranch.threadId}
+          source={compareSource}
+          onOpenStudio={() => setPanel("microdrama-studio")}
+          onUseWinnerText={(text) => {
+            setMergeSelection({ text });
+            setCompareSource(undefined);
             setMergeModalOpen(true);
-          } else {
-            toast.success("Copied assembled segments — send a message in Main to arrange on canvas");
-          }
-        }}
-      />
+          }}
+          onAssembleInCanvas={(text) => {
+            setMergeSelection({ text });
+            setCompareSource(undefined);
+            setMergeModalOpen(true);
+          }}
+        />
+      ) : null}
+
+      {regenerateTarget ? (
+        <RegenerateReplyDialog rpc={rpc} target={regenerateTarget} activeBot={active}
+          persona={mainPersona} onRegenerated={async () => {
+            await refreshActiveThread();
+            toast.success("Reply regenerated");
+          }} onClose={() => setRegenerateTarget(undefined)} />
+      ) : null}
 
       <PageViewHost />
       <CallCard onSettings={() => openSettings("voice")} />

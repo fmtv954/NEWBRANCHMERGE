@@ -317,3 +317,5 @@ export * from "./webhooks/audit-forwarding.js";
 export * from "./webhooks/destination-emulator.js";
 export * from "./webhooks/github-webhook-emulator.js";
 export * from "./webhooks/inbound-delivery.js";
+
+export { resolveConnectedRunModel } from "./runs/turn/run-model.js";

@@ -13,10 +13,11 @@ import type {
   Placement,
   Project,
   RunManifest,
+  ReplyGenerationSelection,
   SelectionBlockRange,
   ThinkingLevel,
 } from "@rakazo/contracts";
-import { findCatalogModel, MergePreviewBaseSchema, SelectionBlockRangeSchema } from "@rakazo/contracts";
+import { findCatalogModel, MergePreviewBaseSchema, ReplyGenerationSelectionSchema, SelectionBlockRangeSchema } from "@rakazo/contracts";
 import type { ItemMergeBaseline, MergeableEntity } from "@rakazo/core";
 import {
   applySurgicalSelectionPatch,
@@ -31,6 +32,7 @@ import {
 import type { PrismaClient } from "@rakazo/db";
 import * as z from "zod";
 import { mergeAnchor, placeMergeText } from "./merge-placement.js";
+import type { ProjectCompletion } from "./project-completion.js";
 
 const StoredStrategyMergeSchema = z.object({
   beforeText: z.string(),
@@ -249,7 +251,18 @@ async function requireProjectAccess(
   return project;
 }
 
-export function createProjectsService(prisma: PrismaClient) {
+export function createProjectsService(prisma: PrismaClient, completeReply?: ProjectCompletion) {
+  async function branchReply(actor: Actor, input: { branchId: string; messageId: string }) {
+    const branch = await prisma.branch.findUnique({ where: { id: input.branchId }, include: { forkOrigin: true } });
+    if (!branch) throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
+    const project = await requireProjectAccess(prisma, actor, branch.projectId, "editor");
+    const message = await prisma.message.findFirst({
+      where: { id: input.messageId, threadId: branch.threadId, role: "assistant" },
+    });
+    if (!message) throw new ORPCError("NOT_FOUND", { message: "Reply not found" });
+    return { branch, message, project };
+  }
+
   return {
     async listProjects(actor: Actor, includeArchived = false): Promise<Project[]> {
       const rows = await prisma.project.findMany({
@@ -762,7 +775,10 @@ export function createProjectsService(prisma: PrismaClient) {
       actor: Actor,
       input: { projectId: string; branchId: string; messageId: string; revisionId: string },
     ) {
-      await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const { branch } = await branchReply(actor, input);
+      if (branch.projectId !== input.projectId || branch.archivedAt) {
+        throw new ORPCError("CONFLICT", { message: "Restore this branch before editing its replies." });
+      }
       const rev = await prisma.messageRevision.findFirst({
         where: { id: input.revisionId, messageId: input.messageId },
       });
@@ -1924,11 +1940,11 @@ export function createProjectsService(prisma: PrismaClient) {
       // Append prior side-branch turns (excluding the just-inserted user message, added at end).
       const priorSideMsgs = await prisma.message.findMany({
         where: { threadId: branch.threadId, seq: { lt: userSeq } },
-        orderBy: { seq: "asc" },
+        orderBy: { seq: "desc" },
         take: 30,
         select: { role: true, blocks: true },
       });
-      for (const sm of priorSideMsgs) {
+      for (const sm of priorSideMsgs.reverse()) {
         if (sm.role !== "user" && sm.role !== "assistant") continue;
         const txt = extractTextFromBlocks(sm.blocks);
         if (txt) llmMessages.push({ role: sm.role, content: txt });
@@ -1948,7 +1964,12 @@ export function createProjectsService(prisma: PrismaClient) {
           threadId: branch.threadId,
           seq: userSeq + 1,
           role: "assistant",
-          blocks: [{ kind: "text", text: completion.text, modelLabel: completion.modelLabel }],
+          blocks: [{ kind: "text", text: completion.text, modelLabel: completion.modelLabel, generation: {
+            provider: input.provider, modelId: input.modelId, personaId: input.personaId ?? null,
+            personaPrompt: input.personaPrompt ?? null, contextMode: input.contextMode,
+            responseStyle: input.responseStyle ?? "direct", temperature: input.temperature ?? null,
+            maxTokens: input.maxTokens ?? null,
+          } }],
         },
         select: { id: true, createdAt: true },
       });
@@ -1968,6 +1989,119 @@ export function createProjectsService(prisma: PrismaClient) {
           createdAt: toIso(assistantRow.createdAt),
         },
       };
+    },
+
+    async regenerationDefaults(actor: Actor, input: { branchId: string; messageId: string }) {
+      const { message } = await branchReply(actor, input);
+      const blocks = MergeMessageBlocksSchema.safeParse(message.blocks).data;
+      const metadata = blocks?.find(({ kind }) => kind === "text")?.generation;
+      const saved = ReplyGenerationSelectionSchema.safeParse(
+        metadata && typeof metadata === "object" ? Object.fromEntries(Object.entries(metadata).filter(([, value]) => value != null)) : metadata,
+      );
+      if (saved.success) return saved.data;
+      if (!message.runId) return null;
+      const run = await prisma.run.findFirst({
+        where: { id: message.runId, threadId: message.threadId, spaceId: actor.spaceId },
+        select: { modelProvider: true, modelId: true, thinkingLevel: true },
+      });
+      const result = ReplyGenerationSelectionSchema.safeParse({
+        provider: run?.modelProvider, modelId: run?.modelId, thinkingLevel: run?.thinkingLevel ?? undefined,
+      });
+      return result.data ?? null;
+    },
+
+    async regenerate(actor: Actor, input: {
+      branchId: string; messageId: string; settings: ReplyGenerationSelection; idempotencyKey: string;
+    }) {
+      if (!completeReply) throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Regeneration is unavailable." });
+      const { branch, message, project } = await branchReply(actor, input);
+      if (branch.archivedAt) throw new ORPCError("CONFLICT", { message: "Restore this branch before regenerating." });
+      const revisionId = `regen_${sha256Hex(JSON.stringify([actor.userId, message.id, input.idempotencyKey]))}`;
+      const result = (text: string, modelLabel: string) => ({
+        id: message.id,
+        role: "assistant" as const,
+        text,
+        modelLabel,
+        createdAt: toIso(message.createdAt),
+      });
+      const existing = await prisma.messageRevision.findUnique({ where: { id: revisionId } });
+      if (existing) {
+        const saved = MergeMessageBlocksSchema.safeParse(existing.blocksJson).data;
+        const label = saved?.find(({ kind }) => kind === "text")?.modelLabel;
+        return result(existing.canonicalText, typeof label === "string" ? label : input.settings.modelId);
+      }
+
+      const blocks = MergeMessageBlocksSchema.safeParse(message.blocks).data;
+      const firstText = blocks?.findIndex(({ kind }) => kind === "text") ?? -1;
+      if (!blocks || firstText < 0) throw new ORPCError("BAD_REQUEST", { message: "This reply has no text to regenerate." });
+      const run = message.runId ? await prisma.run.findFirst({
+        where: { id: message.runId, threadId: branch.threadId, spaceId: actor.spaceId },
+        select: { sourceMessageId: true },
+      }) : null;
+      const promptRow = await prisma.message.findFirst({
+        where: {
+          threadId: branch.threadId,
+          role: "user",
+          seq: { lt: message.seq },
+          ...(run?.sourceMessageId ? { id: run.sourceMessageId } : {}),
+        },
+        orderBy: { seq: "desc" },
+        select: { blocks: true, seq: true },
+      });
+      const prompt = extractTextFromBlocks(promptRow?.blocks);
+      if (!promptRow || !prompt.trim()) throw new ORPCError("CONFLICT", { message: "The original text prompt is unavailable." });
+
+      const rows = await prisma.message.findMany({
+        where: { threadId: branch.threadId, seq: { lt: promptRow.seq }, role: { in: ["user", "assistant"] } },
+        orderBy: { seq: "desc" }, take: 30, select: { role: true, blocks: true },
+      });
+      const focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data?.quoteText;
+      const mode = input.settings.contextMode ?? branch.forkOrigin?.contextMode;
+      const inherited = mode === "through_message" && !branch.isMain && branch.forkOrigin
+        ? await branchReferenceContext(prisma, branch.forkOrigin) : undefined;
+      const replacement = await completeReply(actor, input.settings, {
+        botId: message.botId ?? project.defaultBotId,
+        instructions: [
+          project.instructions,
+          focus ? `Branch focus: ${focus}` : "",
+          inherited ? `Read-only Main context:
+${inherited}` : "",
+          "Answer the original prompt in full.",
+        ].filter(Boolean).join("\n\n"),
+        prompt,
+        history: rows.reverse().flatMap((row) => {
+          const content = extractTextFromBlocks(row.blocks);
+          return content && (row.role === "user" || row.role === "assistant") ? [{ role: row.role, content }] : [];
+        }),
+      });
+      const nextBlocks = blocks.flatMap((block, index) => {
+        if (block.kind !== "text") return [block];
+        return index === firstText ? [{
+          ...block, text: replacement.text, modelLabel: replacement.modelLabel, generation: input.settings,
+        }] : [];
+      });
+      await prisma.$transaction(async (tx) => {
+        const changed = await tx.message.updateMany({
+          where: { id: message.id, threadId: branch.threadId, activeRevisionId: message.activeRevisionId },
+          data: { blocks: nextBlocks as object },
+        });
+        if (!changed.count) throw new ORPCError("CONFLICT", { message: "The reply changed while regenerating. Open it again." });
+        const latest = await tx.messageRevision.findFirst({
+          where: { messageId: message.id }, orderBy: { version: "desc" }, select: { version: true },
+        });
+        if (!latest) {
+          await tx.messageRevision.create({ data: {
+            messageId: message.id, version: 1, canonicalText: extractTextFromBlocks(blocks),
+            blocksJson: blocks as object, sourceAction: "original",
+          } });
+        }
+        await tx.messageRevision.create({ data: {
+          id: revisionId, messageId: message.id, version: latest ? latest.version + 1 : 2,
+          canonicalText: replacement.text, blocksJson: nextBlocks as object, sourceAction: "regenerate",
+        } });
+        await tx.message.update({ where: { id: message.id }, data: { activeRevisionId: revisionId } });
+      });
+      return result(replacement.text, replacement.modelLabel);
     },
 
     async renameBranch(actor: Actor, input: { branchId: string; name: string }): Promise<Branch> {
@@ -2001,40 +2135,76 @@ export function createProjectsService(prisma: PrismaClient) {
     },
 
     async compareRun(
-      _actor: Actor,
+      actor: Actor,
       input: {
         prompt: string;
         personaPrompt?: string;
+        source?: Pick<ReplyGenerationSelection, "contextMode" | "responseStyle" | "temperature" | "maxTokens"> & {
+          branchId: string;
+          blocks: MergeSourceBlock[];
+        };
         models: Array<{ provider: string; modelId: string; displayName: string }>;
       },
     ) {
-      const sys = input.personaPrompt?.trim()
-        ? `${input.personaPrompt.trim()}\n\nFormat for frontier readability: use clear headings, **bold lead-ins** on bullets, short scannable paragraphs, and Markdown [Source](https://...) links where citing references.`
-        : "Answer directly with frontier readability: use clear headings, **bold lead-ins** on bullets, short scannable paragraphs, horizontal rules (---) between major shifts, and Markdown [Source](https://...) links where citing references.";
-
-      const results = await Promise.all(
-        input.models.map(async (m) => {
-          const started = Date.now();
-          const res = await callBranchCompletion({
-            provider: m.provider,
-            modelId: m.modelId,
-            messages: [
-              { role: "system", content: sys },
-              { role: "user", content: input.prompt },
-            ],
-            temperature: 0.5,
-            maxTokens: 1200,
+      const source = input.source;
+      let focus = "";
+      let inherited = "";
+      let botId: string | null | undefined;
+      let history: Parameters<ProjectCompletion>[2]["history"] = [];
+      if (source) {
+        const branch = await prisma.branch.findUnique({ where: { id: source.branchId }, include: { forkOrigin: true } });
+        if (!branch) throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
+        const project = await requireProjectAccess(prisma, actor, branch.projectId, "editor");
+        botId = project.defaultBotId;
+        const ids = [...new Set(source.blocks.map(({ messageId }) => messageId))];
+        if (ids.length) {
+          const found = await prisma.message.count({
+            where: { id: { in: ids }, threadId: branch.threadId, role: "assistant" },
           });
+          if (found !== ids.length) throw new ORPCError("BAD_REQUEST", { message: "A selected reply is no longer in this branch." });
+        }
+        focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data?.quoteText ?? "";
+        if (source.contextMode === "through_message") {
+          if (branch.forkOrigin) inherited = await branchReferenceContext(prisma, branch.forkOrigin);
+          const rows = await prisma.message.findMany({
+            where: { threadId: branch.threadId, role: { in: ["user", "assistant"] } },
+            orderBy: { seq: "desc" }, take: 12, select: { role: true, blocks: true },
+          });
+          history = rows.reverse().flatMap(({ role, blocks }) => {
+            const content = extractTextFromBlocks(blocks).slice(0, 2000);
+            return content && (role === "assistant" || role === "user") ? [{ content, role }] : [];
+          });
+        }
+      }
+      const attached = source?.blocks.map(({ markdown }) => markdown).join("\n\n") ?? "";
+      if (attached.length > 40_000) {
+        throw new ORPCError("BAD_REQUEST", { message: "Select up to 40,000 characters for comparison." });
+      }
+      const prompt = [input.prompt, attached ? `Selected reference blocks:
+${attached}` : ""].filter(Boolean).join("\n\n");
+      const instructions = [
+        "Answer directly using clear headings, short paragraphs, and Markdown formatting where it helps.",
+        focus ? `Branch focus: ${focus}` : "",
+        inherited ? `Read-only Main context:
+${inherited}` : "",
+      ].filter(Boolean).join("\n\n");
+      if (!completeReply) throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Comparison is unavailable." });
+
+      const results = await Promise.all(input.models.map(async (model) => {
+        const started = Date.now();
+        try {
+          const result = await completeReply(actor, {
+            provider: model.provider, modelId: model.modelId, personaPrompt: input.personaPrompt,
+            responseStyle: source?.responseStyle, temperature: source?.temperature, maxTokens: source?.maxTokens,
+          }, { botId, instructions, prompt, history });
+          return { ...model, ...result, latencyMs: Date.now() - started };
+        } catch (err) {
           return {
-            provider: m.provider,
-            modelId: m.modelId,
-            displayName: m.displayName,
-            modelLabel: res.modelLabel,
-            text: res.text,
-            latencyMs: Date.now() - started,
+            ...model, text: "", modelLabel: model.displayName, latencyMs: Date.now() - started,
+            error: err instanceof Error ? err.message : "Generation failed.",
           };
-        }),
-      );
+        }
+      }));
       return { results };
     },
 
@@ -2489,6 +2659,22 @@ export function createProjectsService(prisma: PrismaClient) {
       }
     },
   };
+}
+
+async function branchReferenceContext(
+  prisma: PrismaClient,
+  origin: { sourceBranchId: string; inheritedUpToSeq: number },
+) {
+  const parent = await prisma.branch.findUnique({ where: { id: origin.sourceBranchId }, select: { threadId: true } });
+  if (!parent) return "";
+  const rows = await prisma.message.findMany({
+    where: {
+      threadId: parent.threadId, role: { in: ["user", "assistant"] },
+      ...(origin.inheritedUpToSeq > 0 ? { seq: { lte: origin.inheritedUpToSeq } } : {}),
+    },
+    orderBy: { seq: "desc" }, take: 16, select: { role: true, blocks: true },
+  });
+  return rows.reverse().map(({ role, blocks }) => `[${role}]: ${extractTextFromBlocks(blocks).slice(0, 1600)}`).join("\n\n");
 }
 
 function extractTextFromBlocks(rawBlocks: unknown): string {

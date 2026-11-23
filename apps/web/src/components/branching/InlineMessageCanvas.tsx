@@ -206,6 +206,8 @@ export function InlineMessageCanvas({
                           <span className="text-[10px] text-muted-foreground">
                             {rev.sourceAction === "merge_apply"
                               ? "Merged"
+                              : rev.sourceAction === "regenerate"
+                                ? "Regenerated"
                               : rev.sourceAction === "original"
                                 ? "Original"
                                 : "Edited"}

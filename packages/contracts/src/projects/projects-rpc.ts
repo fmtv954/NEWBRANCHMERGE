@@ -19,6 +19,22 @@ import {
   SelectionBlockRangeSchema,
 } from "./projects.js";
 
+export const ReplyGenerationSelectionSchema = z.object({
+  provider: z.string().min(1).max(100),
+  modelId: z.string().min(1).max(255),
+  thinkingLevel: ThinkingLevelSchema.optional(),
+  personaId: z.string().max(100).optional(),
+  personaPrompt: z.string().max(8_000).optional(),
+  contextMode: BranchContextModeSchema.optional(),
+  responseStyle: z.enum(["direct", "balanced", "deep"]).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(64).max(8_192).optional(),
+});
+
+export type ReplyGenerationSelection = z.infer<typeof ReplyGenerationSelectionSchema>;
+
+const replyTarget = z.object({ branchId: Id, messageId: Id });
+
 export const projectsRpc = {
   projects: {
     list: oc
@@ -271,6 +287,17 @@ export const projectsRpc = {
           }),
         }),
       ),
+    regenerationDefaults: oc.input(replyTarget).output(ReplyGenerationSelectionSchema.nullable()),
+    regenerate: oc.input(replyTarget.extend({
+      settings: ReplyGenerationSelectionSchema,
+      idempotencyKey: z.string().min(1).max(200),
+    })).output(z.object({
+      id: Id,
+      role: z.literal("assistant"),
+      text: z.string(),
+      modelLabel: z.string(),
+      createdAt: z.string(),
+    })),
     rename: oc
       .input(z.object({ branchId: Id, name: z.string().min(1).max(200) }))
       .output(BranchSchema),
@@ -282,6 +309,14 @@ export const projectsRpc = {
         z.object({
           prompt: z.string().min(1).max(20_000),
           personaPrompt: z.string().max(8_000).optional(),
+          source: z.object({
+            branchId: Id,
+            blocks: z.array(MergeSourceBlockSchema).max(1000),
+            contextMode: BranchContextModeSchema,
+            responseStyle: z.enum(["direct", "balanced", "deep"]).optional(),
+            temperature: z.number().min(0).max(2).optional(),
+            maxTokens: z.number().int().min(64).max(8_192).optional(),
+          }).optional(),
           models: z
             .array(
               z.object({
@@ -303,6 +338,7 @@ export const projectsRpc = {
               displayName: z.string(),
               modelLabel: z.string(),
               text: z.string(),
+              error: z.string().optional(),
               latencyMs: z.number().int().nonnegative(),
             }),
           ),

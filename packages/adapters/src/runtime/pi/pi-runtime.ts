@@ -478,7 +478,10 @@ export class PiAgentRuntime implements AgentRuntime {
                 target.models,
                 target.model,
                 ctx,
-                withCloudflareAuth(target.config, options),
+                withCloudflareAuth(target.config, {
+                  ...options,
+                  ...(target.config.temperature !== undefined ? { temperature: target.config.temperature } : {}),
+                }),
                 target.config.maxTokens,
                 () => target.credentials?.accessToken ?? target.apiKey,
                 (preparedOptions) =>

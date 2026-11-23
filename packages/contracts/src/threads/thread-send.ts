@@ -28,6 +28,7 @@ const structuredMentionTarget = z.discriminatedUnion("kind", [
 ]);
 
 const threadSendFields = threadTarget.safeExtend({
+  personaPrompt: z.string().max(8_000).optional(),
   imageHandling: z.enum(["confirm", "file"]).optional(),
   text: z.string().max(THREAD_MESSAGE_TEXT_MAX_LENGTH).optional(),
   artifactIds: z.array(Id).max(ATTACHMENT_COUNT_CEILING).optional(),

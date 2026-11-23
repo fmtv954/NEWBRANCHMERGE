@@ -73,6 +73,7 @@ export function PersonaPicker({
           <button
             type="button"
             data-testid="persona-picker"
+            aria-label={`Model Persona: ${active.name}`}
             className="inline-flex h-7 max-w-[170px] items-center gap-1.5 rounded-lg border border-border bg-card px-2 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
           />
         }
@@ -90,7 +91,7 @@ export function PersonaPicker({
         <div className="border-b border-border px-3 py-2">
           <div className="text-xs font-semibold text-foreground">Model Persona</div>
           <p className="text-[10px] text-muted-foreground">
-            Choose a thinking & voice lens for this branch
+            Choose a persona for this reply or conversation
           </p>
         </div>
 
@@ -112,6 +113,7 @@ export function PersonaPicker({
             />
             <textarea
               rows={3}
+              maxLength={8_000}
               value={promptDraft}
               onChange={(e) => setPromptDraft(e.target.value)}
               placeholder="Role, expertise, process, output format & guardrails..."

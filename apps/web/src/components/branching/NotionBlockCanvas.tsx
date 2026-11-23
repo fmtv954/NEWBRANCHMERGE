@@ -1,12 +1,29 @@
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
+import { SuggestionMenu } from "@blocknote/core/extensions";
 import { BlockNoteView } from "@blocknote/mantine";
-import { useCreateBlockNote } from "@blocknote/react";
+import {
+  FormattingToolbarController,
+  SideMenuController,
+  SuggestionMenuController,
+  useExtensionState,
+  useCreateBlockNote,
+} from "@blocknote/react";
 import { Button } from "@rakazo/ui-web";
-import { ArrowDown, ArrowUp, GitBranch, LocateFixed, Scissors, Undo2 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, GitBranch, LocateFixed, Plus, Scissors, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useAppTheme } from "../../lib/pages/pages";
+import {
+  CanvasFormattingToolbar,
+  CanvasInsertMenu,
+  CanvasSideMenu,
+  openCanvasInsertMenu,
+  type TemporaryInsertBlock,
+  splitCanvasParagraph,
+} from "./canvas-block-controls";
 import { splitParagraph } from "./sentence-blocks";
+
+const mainToolbarPosition = { useFloatingOptions: { placement: "bottom-start" as const } };
 
 export function NotionBlockCanvas({
   initialMarkdown,
@@ -30,6 +47,24 @@ export function NotionBlockCanvas({
   const canvasId = useId();
   const initializedFor = useRef<string | null>(null);
   const loading = useRef(false);
+  const temporaryBlock = useRef<TemporaryInsertBlock | undefined>(undefined);
+  const registerTemporary = useCallback((block: TemporaryInsertBlock) => { temporaryBlock.current = block; }, []);
+  const renderSideMenu = useCallback(() => <CanvasSideMenu onTemporaryBlock={registerTemporary} />, [registerTemporary]);
+  const insertMenuOpen = useExtensionState(SuggestionMenu, { editor, selector: (state) => state?.show === true });
+  useEffect(() => {
+    if (insertMenuOpen || !temporaryBlock.current) return;
+    const { id, returnTo } = temporaryBlock.current;
+    temporaryBlock.current = undefined;
+    const block = editor.getBlock(id);
+    if (block?.type === "paragraph" && block.content.length === 0 && !block.children.length) {
+      const restoreCursor = editor.isFocused() && editor.getTextCursorPosition().block.id === id;
+      editor.transact((transaction) => {
+        transaction.setMeta("addToHistory", false);
+        editor.removeBlocks([block]);
+        if (restoreCursor && editor.getBlock(returnTo)) editor.setTextCursorPosition(returnTo, "end");
+      });
+    }
+  }, [editor, insertMenuOpen]);
   const [ready, setReady] = useState(false);
   const [focusedBlockId, setFocusedBlockId] = useState<string>();
   const [incomingIds, setIncomingIds] = useState<string[]>([]);
@@ -83,17 +118,9 @@ export function NotionBlockCanvas({
   const sentences = activeBlock?.type === "paragraph" ? splitParagraph(activeBlock.content) : [];
   const canEdit = ready && !disabled;
 
-  function splitActiveParagraph() {
-    if (!activeBlock || sentences.length < 2) return;
-    const [first, ...rest] = sentences;
-    editor.transact(() => {
-      editor.updateBlock(activeBlock, { content: first });
-      editor.insertBlocks(
-        rest.map((content) => ({ type: "paragraph", content })),
-        activeBlock,
-        "after",
-      );
-    });
+  function openInsertMenu() {
+    const block = activeBlock ?? editor.document.at(-1);
+    if (block) openCanvasInsertMenu(editor, block, registerTemporary);
   }
 
   function branchFromBlock() {
@@ -110,6 +137,12 @@ export function NotionBlockCanvas({
         `[data-merge-canvas="${CSS.escape(canvasId)}"] .bn-block-outer[data-id="${CSS.escape(id)}"] > .bn-block > .bn-block-content`,
     )
     .join(",");
+  const insertButton = (
+    <Button type="button" size="xs" variant="ghost" disabled={!canEdit} onClick={openInsertMenu}>
+      <Plus className="size-3.5" />
+      Insert block
+    </Button>
+  );
   return (
     <div
       className={`flex min-h-0 flex-col ${variant === "raw" ? "clone-raw-blocknote bg-transparent" : ""}`}
@@ -117,80 +150,85 @@ export function NotionBlockCanvas({
     >
       {variant === "studio" ? (
         <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/40 px-2 py-1">
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          disabled={!canEdit || sentences.length < 2}
-          onClick={splitActiveParagraph}
-        >
-          <Scissors className="size-3.5" />
-          Split into sentences
-        </Button>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Move block up"
-          title="Move block up"
-          disabled={!canEdit || !activeBlock}
-          onClick={() => editor.moveBlocksUp(activeBlock)}
-        >
-          <ArrowUp className="size-3.5" />
-        </Button>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Move block down"
-          title="Move block down"
-          disabled={!canEdit || !activeBlock}
-          onClick={() => editor.moveBlocksDown(activeBlock)}
-        >
-          <ArrowDown className="size-3.5" />
-        </Button>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          aria-label="Undo edit"
-          title="Undo edit"
-          disabled={!canEdit}
-          onClick={() => editor.undo()}
-        >
-          <Undo2 className="size-3.5" />
-        </Button>
-        {onBranch ? (
+          {insertButton}
           <Button
             type="button"
             size="xs"
             variant="ghost"
-            disabled={!canEdit || !activeBlock}
-            onClick={branchFromBlock}
-          >
-            <GitBranch className="size-3.5" />
-            Branch from block
-          </Button>
-        ) : null}
-        {incomingIds.length ? (
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
+            disabled={!canEdit || sentences.length < 2}
             onClick={() => {
-              const change = incomingIds
-                .map((id) =>
-                  editor.domElement?.querySelector(`.bn-block-outer[data-id="${CSS.escape(id)}"]`),
-                )
-                .find(Boolean);
-              change?.scrollIntoView({ block: "nearest" });
+              if (activeBlock) splitCanvasParagraph(editor, activeBlock);
             }}
           >
-            <LocateFixed className="size-3.5" />
-            Jump to changes
+            <Scissors className="size-3.5" />
+            Split into sentences
           </Button>
-        ) : null}
-      </div>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            aria-label="Move block up"
+            title="Move block up"
+            disabled={!canEdit || !activeBlock}
+            onClick={() => editor.moveBlocksUp(activeBlock)}
+          >
+            <ArrowUp className="size-3.5" />
+          </Button>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            aria-label="Move block down"
+            title="Move block down"
+            disabled={!canEdit || !activeBlock}
+            onClick={() => editor.moveBlocksDown(activeBlock)}
+          >
+            <ArrowDown className="size-3.5" />
+          </Button>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            aria-label="Undo edit"
+            title="Undo edit"
+            disabled={!canEdit}
+            onClick={() => editor.undo()}
+          >
+            <Undo2 className="size-3.5" />
+          </Button>
+          {onBranch ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              disabled={!canEdit || !activeBlock}
+              onClick={branchFromBlock}
+            >
+              <GitBranch className="size-3.5" />
+              Branch from block
+            </Button>
+          ) : null}
+          {incomingIds.length ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={() => {
+                const change = incomingIds
+                  .map((id) =>
+                    editor.domElement?.querySelector(
+                      `.bn-block-outer[data-id="${CSS.escape(id)}"]`,
+                    ),
+                  )
+                  .find(Boolean);
+                change?.scrollIntoView({ block: "nearest" });
+              }}
+            >
+              <LocateFixed className="size-3.5" />
+              Jump to changes
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {error ? (
         <p role="alert" className="px-4 py-2 text-sm text-destructive">
@@ -204,6 +242,9 @@ export function NotionBlockCanvas({
         editor={editor}
         theme={theme}
         editable={canEdit}
+        formattingToolbar={false}
+        sideMenu={false}
+        slashMenu={false}
         onChange={() => {
           emitMarkdown();
           setFocusedBlockId(editor.getTextCursorPosition().block.id);
@@ -214,7 +255,15 @@ export function NotionBlockCanvas({
             ? "min-w-0 bg-transparent py-0.5 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-7 [&_.bn-editor]:text-[15px] [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-1 [&_.bn-block-content]:py-0.5"
             : "min-w-0 bg-background py-3 [&_.bn-editor]:bg-transparent [&_.bn-editor]:px-10 [&_.bn-block-content]:rounded-md [&_.bn-block-content]:px-2 [&_.bn-block-content]:py-1"
         }
-      />
+      >
+        <SideMenuController sideMenu={renderSideMenu} />
+        <SuggestionMenuController triggerCharacter="/" suggestionMenuComponent={CanvasInsertMenu} />
+        <FormattingToolbarController
+          formattingToolbar={CanvasFormattingToolbar}
+          floatingUIOptions={variant === "raw" ? mainToolbarPosition : undefined}
+        />
+      </BlockNoteView>
+      {variant === "raw" ? <div className="pl-7">{insertButton}</div> : null}
     </div>
   );
 }

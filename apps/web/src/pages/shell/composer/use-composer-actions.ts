@@ -51,6 +51,7 @@ type ThreadRefresh = RefObject<(id: string) => Promise<ThreadSnapshot>>;
 export function useComposerActions({
   rpc,
   pageSession,
+  personaPrompt,
   activeId,
   inGroup,
   groupId,
@@ -73,6 +74,7 @@ export function useComposerActions({
   rpc: ReturnType<typeof createSpaceRpc>;
   /** The chat's open page, whose card a message sent from it replies to. */
   pageSession: PageSession;
+  personaPrompt?: string;
   activeId: string | undefined;
   inGroup: boolean;
   groupId: string | undefined;
@@ -465,6 +467,7 @@ export function useComposerActions({
           ...(groupTarget ? { groupId: groupTarget } : { botId: botTarget! }),
           clientNonce,
           imageHandling: imageHandling ?? "confirm",
+          personaPrompt: groupTarget ? undefined : personaPrompt,
           text: trimmed || undefined,
           mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
           artifactIds: artifactIds.length ? artifactIds : undefined,
@@ -539,6 +542,7 @@ export function useComposerActions({
     [
       activeSnapshot?.messages,
       pageSession,
+      personaPrompt,
       clearSentReply,
       flushPendingBrowserNotifications,
       navigate,

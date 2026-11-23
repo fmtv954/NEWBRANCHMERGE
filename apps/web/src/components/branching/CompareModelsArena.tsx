@@ -1,7 +1,7 @@
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
 import type { Bot } from "@rakazo/contracts";
 import { buildSmartSegments, computeWordDiff } from "@rakazo/core";
-import { Badge, Button, Checkbox, Dialog, DialogContent, Textarea } from "@rakazo/ui-web";
+import { Badge, Button, Checkbox, Dialog, DialogContent, DialogTitle, Textarea } from "@rakazo/ui-web";
 import {
   Award,
   Check,
@@ -21,6 +21,8 @@ import { useMemo, useState } from "react";
 import { useUnifiedModels } from "../../lib/models/use-unified-models";
 import type { createSpaceRpc } from "../../lib/query/rpc";
 
+import type { BranchCompareSource } from "./branch-selection";
+
 type CompareModality = "text" | "image" | "video";
 
 interface TextCompareResult {
@@ -29,6 +31,7 @@ interface TextCompareResult {
   displayName: string;
   modelLabel: string;
   text: string;
+  error?: string;
   latencyMs: number;
 }
 
@@ -60,6 +63,7 @@ export function CompareModelsArena({
   rpc,
   activeBot,
   threadId,
+  source,
   onUseWinnerText,
   onAssembleInCanvas,
   onOpenStudio,
@@ -69,14 +73,15 @@ export function CompareModelsArena({
   rpc: ReturnType<typeof createSpaceRpc>;
   activeBot?: Bot;
   threadId?: string | null;
+  source?: BranchCompareSource;
   onUseWinnerText: (text: string) => Promise<void> | void;
   onAssembleInCanvas: (combinedMarkdown: string) => void;
   onOpenStudio?: () => void;
 }) {
   const { allRows } = useUnifiedModels(activeBot);
   const [modality, setModality] = useState<CompareModality>("text");
-  const [prompt, setPrompt] = useState("");
-  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [prompt, setPrompt] = useState(source?.prompt ?? "");
+  const [selectedKeys, setSelectedKeys] = useState<string[]>();
   const [running, setRunning] = useState(false);
   const [judging, setJudging] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
@@ -87,28 +92,19 @@ export function CompareModelsArena({
   const [error, setError] = useState<string | null>(null);
 
   const modalityModels = useMemo(
-    () => allRows.filter((r) => r.kind === modality),
+    () => allRows.filter((row) => row.kind === modality && (modality !== "text" || row.status !== "needs_key")),
     [allRows, modality],
   );
 
-  // Auto-pick top 2 models for the active modality if user hasn't picked yet
-  const activeKeys = useMemo(() => {
-    const valid = selectedKeys.filter((k) => modalityModels.some((m) => m.key === k));
-    if (valid.length >= 2) return valid;
-    return modalityModels.slice(0, 2).map((m) => m.key);
-  }, [selectedKeys, modalityModels]);
+  const activeKeys = selectedKeys?.filter((key) => modalityModels.some((model) => model.key === key))
+    ?? modalityModels.slice(0, 2).map(({ key }) => key);
 
   function toggleModelKey(key: string) {
-    setSelectedKeys((prev) => {
-      const base = prev.filter((k) => modalityModels.some((m) => m.key === k));
-      const effective = base.length >= 2 ? base : activeKeys;
-      if (effective.includes(key)) {
-        if (effective.length <= 2) return effective;
-        return effective.filter((k) => k !== key);
-      }
-      if (effective.length >= 4) return [...effective.slice(1), key];
-      return [...effective, key];
-    });
+    if (activeKeys.includes(key)) {
+      setSelectedKeys(activeKeys.filter((selected) => selected !== key));
+    } else if (activeKeys.length < 4) {
+      setSelectedKeys([...activeKeys, key]);
+    }
   }
 
   function toggleSegment(segKey: string, md: string) {
@@ -138,6 +134,12 @@ export function CompareModelsArena({
         setMediaResults([]);
         const res = await rpc.branches.compareRun({
           prompt: q,
+          personaPrompt: source?.settings.personaPrompt,
+          source: source ? {
+            branchId: source.branchId, blocks: source.blocks,
+            contextMode: source.settings.contextMode, responseStyle: source.settings.responseStyle,
+            temperature: source.settings.temperature, maxTokens: source.settings.maxTokens,
+          } : undefined,
           models: chosen.map((m) => ({
             provider: m.provider,
             modelId: m.modelId,
@@ -163,7 +165,7 @@ export function CompareModelsArena({
                   | "higgsfield",
                 modelId: m.modelId,
                 kind: modality === "video" ? "video_gen" : "image_gen",
-                prompt: q,
+                prompt: [q, source?.blocks.map(({ markdown }) => markdown).join("\n\n")].filter(Boolean).join("\n\n"),
               });
               const firstUrl =
                 ("url" in res && typeof res.url === "string" ? res.url : null) ??
@@ -199,14 +201,19 @@ export function CompareModelsArena({
   }
 
   async function handleRunJudge() {
-    if (textResults.length < 2 || judging) return;
+    const candidates = textResults.flatMap((result, index) => result.error ? [] : [{ result, index }]);
+    if (candidates.length < 2 || judging) return;
     setJudging(true);
     try {
       const res = await rpc.branches.judgeCompare({
         prompt: prompt.trim(),
-        candidates: textResults.map((r) => ({ modelLabel: r.displayName, text: r.text })),
+        candidates: candidates.map(({ result }) => ({ modelLabel: result.displayName, text: result.text })),
       });
-      setVerdict(res);
+      setVerdict({
+        ...res,
+        winnerIndex: candidates[res.winnerIndex]?.index ?? -1,
+        scores: res.scores.map((score) => ({ ...score, index: candidates[score.index]?.index ?? -1 })),
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Judge failed");
     } finally {
@@ -218,12 +225,12 @@ export function CompareModelsArena({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[88vh] w-[92vw] max-w-[92vw] flex-col overflow-hidden border border-border bg-card p-0 text-foreground">
+      <DialogContent showCloseButton={false} className="flex h-[88vh] w-[92vw] max-w-[92vw] sm:max-w-[92vw] flex-col overflow-hidden border border-border bg-card p-0 text-foreground">
         {/* Header */}
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
           <div className="flex items-center gap-2">
             <Columns3 className="size-4 text-success" />
-            <h2 className="text-base font-semibold">Multi-Modal Compare Arena</h2>
+            <DialogTitle className="text-base font-semibold">Compare models</DialogTitle>
             <div className="ml-2 inline-flex rounded-lg border border-border bg-muted/60 p-0.5">
               {(
                 [
@@ -237,6 +244,7 @@ export function CompareModelsArena({
                   type="button"
                   onClick={() => {
                     setModality(id);
+                    setSelectedKeys(undefined);
                     setTextResults([]);
                     setMediaResults([]);
                     setVerdict(null);
@@ -265,19 +273,29 @@ export function CompareModelsArena({
           </button>
         </div>
 
+        {source?.blocks.length ? (
+          <details className="shrink-0 border-b border-border px-5 py-2 text-xs">
+            <summary className="cursor-pointer">Source blocks ({source.blocks.length})</summary>
+            <ol className="max-h-32 list-decimal space-y-1 overflow-y-auto pl-5 pt-2">
+              {source.blocks.map((block) => <li key={block.blockId}><ChatMarkdown>{block.markdown}</ChatMarkdown></li>)}
+            </ol>
+          </details>
+        ) : null}
         {/* Prompt + Model Chips Bar */}
         <div className="shrink-0 space-y-2.5 border-b border-border bg-muted/20 px-5 py-3">
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex max-h-24 flex-wrap items-center gap-1.5 overflow-y-auto">
             <span className="mr-1 text-[11px] font-medium text-muted-foreground">
-              Pick 2–4 models:
+              Pick 2–4 models
             </span>
-            {modalityModels.slice(0, 14).map((m) => {
+            {modalityModels.map((m) => {
               const selected = activeKeys.includes(m.key);
               return (
                 <button
                   key={m.key}
                   type="button"
                   onClick={() => toggleModelKey(m.key)}
+                  aria-pressed={selected}
+                  disabled={!selected && activeKeys.length === 4}
                   className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
                     selected
                       ? "border-success/70 bg-success/15 text-success"
@@ -292,9 +310,13 @@ export function CompareModelsArena({
             })}
           </div>
 
+          {modality === "text" && modalityModels.length < 2 ? (
+            <p className="text-xs text-muted-foreground">Connect at least two text models to compare.</p>
+          ) : null}
           <div className="flex items-end gap-2">
             <Textarea
               rows={2}
+              aria-label="Comparison prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={
@@ -442,7 +464,7 @@ export function CompareModelsArena({
                       ) : null}
 
                       <div className="flex-1 space-y-1.5 text-xs">
-                        {showDiff && idx > 0 ? (
+                        {res.error ? <p role="alert" className="text-destructive">{res.error}</p> : showDiff && idx > 0 ? (
                           <div className="whitespace-pre-wrap leading-relaxed">
                             {computeWordDiff(baseText, res.text).map((tok, tIdx) => (
                               <span
@@ -493,6 +515,7 @@ export function CompareModelsArena({
                           type="button"
                           size="sm"
                           variant="outline"
+                          disabled={Boolean(res.error)}
                           onClick={async () => {
                             await onUseWinnerText(res.text);
                             onOpenChange(false);
@@ -500,7 +523,7 @@ export function CompareModelsArena({
                           className="h-7 gap-1 text-xs text-success"
                         >
                           <Check className="size-3" />
-                          <span>Use Winner in Main</span>
+                          <span>Preview merge into Main</span>
                         </Button>
                       </div>
                     </div>

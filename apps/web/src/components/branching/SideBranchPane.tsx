@@ -27,9 +27,14 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import type { Ref } from "react";
+import { useEffect, useImperativeHandle, useRef, useState } from "react";
 import { useUnifiedModels } from "../../lib/models/use-unified-models";
 import type { createSpaceRpc } from "../../lib/query/rpc";
+import type { BranchCompareSource } from "./branch-selection";
+import { BranchExportDialog } from "./BranchExportDialog";
+import { RegenerateReplyDialog } from "./RegenerateReplyDialog";
+import { SideReplyHistory } from "./SideReplyHistory";
 import { PersonaPicker } from "./PersonaPicker";
 import { SideBranchModelPicker } from "./SideBranchModelPicker";
 import { hasMultipleSentences, splitMarkdownParagraph } from "./sentence-blocks";
@@ -41,6 +46,8 @@ export interface SideBranchMessage {
   modelLabel?: string;
   createdAt?: string;
 }
+
+export type SideBranchPaneHandle = { openMergeReview: () => void };
 
 function focusRenameInput(input: HTMLInputElement | null) {
   input?.focus();
@@ -56,6 +63,7 @@ function focusRenameInput(input: HTMLInputElement | null) {
  * - 1-click quick actions (`Insert at spot`, `Replace spot`, `Drop as Block`) + full `Merge` modal
  */
 export function SideBranchPane({
+  ref,
   rpc,
   branch,
   activeBot,
@@ -65,8 +73,11 @@ export function SideBranchPane({
   onInjectIntoMain,
   onOpenMergeReview,
   onOpenCompareArena,
+  selectionReset,
+  onRestoreBranch,
   onClose,
 }: {
+  ref?: Ref<SideBranchPaneHandle>;
   rpc: ReturnType<typeof createSpaceRpc>;
   branch: Branch;
   activeBot?: Bot;
@@ -80,7 +91,9 @@ export function SideBranchPane({
     sourceBranchId: string;
   }) => Promise<void>;
   onOpenMergeReview: (selectedText?: string, selectedBlocks?: MergeSourceBlock[]) => void;
-  onOpenCompareArena?: () => void;
+  onOpenCompareArena?: (source: BranchCompareSource) => void;
+  selectionReset?: number;
+  onRestoreBranch?: () => Promise<void>;
   onClose: () => void;
 }) {
   const { defaultMainModelKey } = useUnifiedModels(activeBot);
@@ -110,16 +123,65 @@ export function SideBranchPane({
   const [injectingKey, setInjectingKey] = useState<string | null>(null);
   const [selectedSegments, setSelectedSegments] = useState<MergeSourceBlock[]>([]);
   const [splitBlocks, setSplitBlocks] = useState<Record<string, MergeSourceBlock[]>>({});
+  const [regenerateId, setRegenerateId] = useState<string>();
+  const [exportOpen, setExportOpen] = useState(false);
+  const [manuallyOrdered, setManuallyOrdered] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
 
-  function toggleSegmentSelection(block: MergeSourceBlock) {
-    setSelectedSegments((current) =>
-      current.some((item) => item.blockId === block.blockId)
-        ? current.filter((item) => item.blockId !== block.blockId)
-        : [...current, block],
-    );
+  const selectionAnchor = useRef<string | null>(null);
+
+  function replyBlocks(message: SideBranchMessage) {
+    return buildSmartSegments(message.text).flatMap((segment, index) => {
+      const blockId = `${message.id}:${segment.id}:${index}`;
+      return (
+        splitBlocks[blockId]?.map((block) => ({ block, canSplit: false })) ?? [
+          {
+            block: { messageId: message.id, blockId, markdown: segment.markdown },
+            canSplit: segment.blockType === "paragraph" && hasMultipleSentences(segment.plainText),
+          },
+        ]
+      );
+    });
+  }
+
+  const allBlocks = messages
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) => replyBlocks(message).map(({ block }) => block));
+  const selectedIds = new Set(selectedSegments.map(({ blockId }) => blockId));
+  const allBlockIds = new Set(allBlocks.map(({ blockId }) => blockId));
+  const activeBlocks = manuallyOrdered
+    ? selectedSegments.filter(({ blockId }) => allBlockIds.has(blockId))
+    : allBlocks.filter(({ blockId }) => selectedIds.has(blockId));
+
+  useEffect(() => {
+    selectionAnchor.current = null;
+    setSelectedSegments([]);
+    setManuallyOrdered(false);
+  }, [selectionReset]);
+
+  function toggleSegmentSelection(block: MergeSourceBlock, checked: boolean, extend: boolean) {
+    const anchor = selectionAnchor.current;
+    selectionAnchor.current = block.blockId;
+    let affected = [block];
+    if (extend && anchor) {
+      const ordered = allBlocks;
+      const from = ordered.findIndex((item) => item.blockId === anchor);
+      const to = ordered.findIndex((item) => item.blockId === block.blockId);
+      if (from >= 0 && to >= 0) {
+        affected = ordered.slice(Math.min(from, to), Math.max(from, to) + 1);
+      }
+    }
+
+    setSelectedSegments((current) => {
+      if (!checked) {
+        const removed = new Set(affected.map(({ blockId }) => blockId));
+        return current.filter((item) => !removed.has(item.blockId));
+      }
+      const selected = new Set(current.map(({ blockId }) => blockId));
+      return [...current, ...affected.filter((item) => !selected.has(item.blockId))];
+    });
   }
 
   function splitBlock(block: MergeSourceBlock) {
@@ -141,16 +203,17 @@ export function SideBranchPane({
   }
 
   function moveSelection(index: number, direction: -1 | 1) {
-    setSelectedSegments((current) => {
+    setManuallyOrdered(true);
+    setSelectedSegments(() => {
       const destination = index + direction;
-      if (destination < 0 || destination >= current.length) return current;
-      const next = [...current];
+      if (destination < 0 || destination >= activeBlocks.length) return activeBlocks;
+      const next = [...activeBlocks];
       [next[index], next[destination]] = [next[destination]!, next[index]!];
       return next;
     });
   }
 
-  const selectedText = selectedSegments.map((block) => block.markdown).join("\n\n");
+  const selectedText = activeBlocks.map((block) => block.markdown).join("\n\n");
 
   async function inject(
     mode: "insert_spot" | "replace_spot" | "drop_block",
@@ -163,10 +226,12 @@ export function SideBranchPane({
       await onInjectIntoMain({
         mode,
         text: selectedText || message.text,
-        selectedBlocks: selectedSegments.length ? selectedSegments : undefined,
+        selectedBlocks: activeBlocks.length ? activeBlocks : undefined,
         sourceBranchId: branch.id,
       });
+      selectionAnchor.current = null;
       setSelectedSegments([]);
+      setManuallyOrdered(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not insert into Main");
     } finally {
@@ -197,7 +262,6 @@ export function SideBranchPane({
       })
       .catch((err) => {
         if (!cancelled) {
-          setMessages([]);
           setError(err instanceof Error ? err.message : "Could not load branch history");
         }
       })
@@ -228,16 +292,47 @@ export function SideBranchPane({
     }
   }
 
-  async function handleSend(overridePrompt?: string) {
-    const prompt = (overridePrompt ?? draft).trim();
-    if (!prompt || sending) return;
-    if (!overridePrompt) setDraft("");
+  function clearReplySelection(messageId: string) {
+    setSelectedSegments((current) => current.filter((block) => block.messageId !== messageId));
+    setSplitBlocks((current) => Object.fromEntries(Object.entries(current).filter(([, blocks]) => blocks[0]?.messageId !== messageId)));
+    selectionAnchor.current = null;
+  }
+
+  function openCompare(reply?: SideBranchMessage) {
+    const latest = reply ?? [...messages].reverse().find((message) => message.role === "assistant");
+    const blocks = reply
+      ? replyBlocks(reply).map(({ block }) => block)
+      : activeBlocks.length
+        ? activeBlocks
+        : latest ? replyBlocks(latest).map(({ block }) => block) : [];
+    const sourceIndex = messages.findIndex((message) => message.id === (blocks[0]?.messageId ?? latest?.id));
+    const originalQuestion = messages.slice(0, Math.max(0, sourceIndex))
+      .reverse().find((message) => message.role === "user")?.text;
+    onOpenCompareArena?.({
+      branchId: branch.id,
+      blocks,
+      prompt: draft.trim() || originalQuestion || (blocks.length ? "Generate a response using these blocks." : ""),
+      settings: {
+        contextMode,
+        personaPrompt: activePersona.systemPrompt || undefined,
+        responseStyle,
+        temperature: customTemp ?? undefined,
+        maxTokens: customMaxTokens ?? undefined,
+      },
+    });
+  }
+
+  async function handleSend() {
+    const prompt = draft.trim();
+    if (!prompt || sending || branch.archivedAt) return;
+    setDraft("");
     setError(null);
     const tempId = `temp_u_${Date.now()}`;
     setMessages((prev) => [...prev, { id: tempId, role: "user", text: prompt }]);
     setSending(true);
     try {
-      const [provider = "openai", modelId = "gpt-4o-mini"] = (selectedModel || defaultMainModelKey).split(":");
+      const [provider, ...modelParts] = (selectedModel || defaultMainModelKey).split(":");
+      const modelId = modelParts.join(":");
       const res = await rpc.branches.send({
         branchId: branch.id,
         text: prompt,
@@ -267,14 +362,20 @@ export function SideBranchPane({
   const latestAssistantText =
     [...messages].reverse().find((m) => m.role === "assistant")?.text ?? "";
 
+  function openMergeReview() {
+    onOpenMergeReview(selectedText || latestAssistantText, activeBlocks.length ? activeBlocks : undefined);
+  }
+
+  useImperativeHandle(ref, () => ({ openMergeReview }));
+
   return (
     <aside
       data-testid="side-branch-pane"
-      className="flex h-full w-full flex-col border-l border-border bg-background/95 md:w-[46%] md:min-w-[360px] md:max-w-[540px]"
+      className="flex h-full min-h-0 w-full flex-col border-l border-border bg-background/95 md:w-[46%] md:min-w-[360px] md:max-w-[540px]"
     >
       {/* Header: Inline-editable branch name + Context toggle + Merge + Close */}
-      <div className="flex items-center justify-between gap-2 border-b border-border px-3.5 py-2.5">
-        <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3.5 py-2.5">
+        <div className="flex min-w-20 flex-1 items-center gap-1.5">
           <GitBranch className="size-4 shrink-0 text-success" />
           {editingName ? (
             <input
@@ -320,7 +421,7 @@ export function SideBranchPane({
               variant="outline"
               size="sm"
               title="Compare 2–4 models in parallel with AI difference analysis"
-              onClick={onOpenCompareArena}
+              onClick={() => openCompare()}
               className="h-6 gap-1 px-2 text-[11px] text-sky-400 hover:text-sky-300"
             >
               <Columns3 className="size-3" />
@@ -332,17 +433,12 @@ export function SideBranchPane({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => {
-              onOpenMergeReview(
-                selectedText || latestAssistantText,
-                selectedSegments.length ? selectedSegments : undefined,
-              );
-            }}
+            onClick={openMergeReview}
             className="h-6 gap-1 px-2 text-[11px] text-success"
           >
             <GitMerge className="size-3" />
             <span>
-              {selectedSegments.length > 0 ? `Merge (${selectedSegments.length})` : "Merge"}
+              {activeBlocks.length > 0 ? `Merge (${activeBlocks.length})` : "Merge"}
             </span>
           </Button>
 
@@ -368,8 +464,15 @@ export function SideBranchPane({
         </div>
       ) : null}
 
+      {branch.archivedAt && onRestoreBranch ? (
+        <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2 text-xs">
+          <span>Archived branch</span>
+          <Button type="button" size="xs" variant="outline" onClick={() => void onRestoreBranch()}>Restore branch</Button>
+        </div>
+      ) : null}
+
       {/* Side-Branch Transcript (Persisted on branch.threadId) */}
-      <div className="rk-scroll flex-1 space-y-3 overflow-y-auto p-3.5">
+      <div className="rk-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5">
         {loadingHistory ? (
           <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" />
@@ -399,53 +502,46 @@ export function SideBranchPane({
                 ) : null}
                 {msg.role === "assistant" ? (
                   <div className="space-y-1.5">
-                    {buildSmartSegments(msg.text)
-                      .flatMap((seg, index) => {
-                        const blockId = `${msg.id}:${seg.id}:${index}`;
-                        return (
-                          splitBlocks[blockId]?.map((block) => ({ block, canSplit: false })) ?? [
-                            {
-                              block: { messageId: msg.id, blockId, markdown: seg.markdown },
-                              canSplit:
-                                seg.blockType === "paragraph" &&
-                                hasMultipleSentences(seg.plainText),
-                            },
-                          ]
-                        );
-                      })
-                      .map(({ block, canSplit }, index) => {
-                        const checked = selectedSegments.some(
-                          (item) => item.blockId === block.blockId,
-                        );
-                        return (
-                          <div
-                            key={block.blockId}
-                            className={`flex items-start gap-2 rounded-lg px-1.5 py-1 transition-colors hover:bg-muted/35 ${checked ? "bg-success/10 ring-1 ring-success/50" : ""}`}
-                          >
-                            <Checkbox
-                              checked={checked}
-                              aria-label={`Select reply block ${index + 1}`}
-                              onCheckedChange={() => toggleSegmentSelection(block)}
-                              className="mt-1 shrink-0"
-                            />
-                            <div className="min-w-0 flex-1 text-xs leading-relaxed">
-                              <ChatMarkdown>{block.markdown}</ChatMarkdown>
-                            </div>
-                            {canSplit ? (
-                              <Button
-                                type="button"
-                                size="icon-xs"
-                                variant="ghost"
-                                title="Split into sentences"
-                                aria-label={`Split reply block ${index + 1} into sentences`}
-                                onClick={() => splitBlock(block)}
-                              >
-                                <Scissors className="size-3.5" />
-                              </Button>
-                            ) : null}
+                    {replyBlocks(msg).map(({ block, canSplit }, index) => {
+                      const checked = selectedIds.has(block.blockId);
+                      return (
+                        <div
+                          key={block.blockId}
+                          className={`flex items-start gap-2 rounded-lg px-1.5 py-1 transition-colors hover:bg-muted/35 ${checked ? "bg-success/10 ring-1 ring-success/50" : ""}`}
+                        >
+                          <Checkbox
+                            checked={checked}
+                            aria-label={`Select reply block ${index + 1}`}
+                              onMouseDown={(event) => {
+                                if (event.shiftKey) event.preventDefault();
+                              }}
+                            onCheckedChange={(nextChecked, { event }) =>
+                              toggleSegmentSelection(
+                                block,
+                                nextChecked,
+                                event instanceof MouseEvent && event.shiftKey,
+                              )
+                            }
+                            className="mt-1 shrink-0"
+                          />
+                          <div className="min-w-0 flex-1 text-xs leading-relaxed">
+                            <ChatMarkdown>{block.markdown}</ChatMarkdown>
                           </div>
-                        );
-                      })}
+                          {canSplit ? (
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              title="Split into sentences"
+                              aria-label={`Split reply block ${index + 1} into sentences`}
+                              onClick={() => splitBlock(block)}
+                            >
+                              <Scissors className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
@@ -463,7 +559,7 @@ export function SideBranchPane({
                     className="h-6 gap-1 px-2 text-[10px] text-success"
                   >
                     <ArrowDownToLine className="size-3" />
-                    <span>{selectedSegments.length ? "Insert selected" : "Insert at spot"}</span>
+                    <span>{activeBlocks.length ? "Insert selected" : "Insert at spot"}</span>
                   </Button>
 
                   {focusQuote ? (
@@ -477,7 +573,7 @@ export function SideBranchPane({
                     >
                       <Check className="size-3" />
                       <span>
-                        {selectedSegments.length ? "Replace with selected" : "Replace spot"}
+                        {activeBlocks.length ? "Replace with selected" : "Replace spot"}
                       </span>
                     </Button>
                   ) : null}
@@ -491,26 +587,32 @@ export function SideBranchPane({
                     className="h-6 gap-1 px-2 text-[10px]"
                   >
                     <BookmarkPlus className="size-3" />
-                    <span>{selectedSegments.length ? "Add selected to bottom" : "Add to bottom"}</span>
+                    <span>{activeBlocks.length ? "Add selected to bottom" : "Add to bottom"}</span>
                   </Button>
 
                   <Button
                     type="button"
                     size="sm"
                     variant="ghost"
-                    disabled={sending}
-                    onClick={() => {
-                      const msgIdx = messages.findIndex((m) => m.id === msg.id);
-                      const prevUser = [...messages.slice(0, msgIdx)]
-                        .reverse()
-                        .find((m) => m.role === "user");
-                      if (prevUser?.text) void handleSend(prevUser.text);
-                    }}
+                    disabled={sending || Boolean(branch.archivedAt)}
+                    onClick={() => setRegenerateId(msg.id)}
                     className="h-6 gap-1 px-2 text-[10px] text-sky-400 hover:text-sky-300"
                   >
                     <RotateCw className="size-3" />
                     <span>Regenerate</span>
                   </Button>
+                  <SideReplyHistory branch={branch} messageId={msg.id} rpc={rpc} onRestored={async () => {
+                    const result = await rpc.branches.messages({ branchId: branch.id });
+                    setMessages(result.messages);
+                    clearReplySelection(msg.id);
+                  }} />
+                  {onOpenCompareArena ? (
+                    <Button type="button" size="icon-xs" variant="ghost" aria-label="Compare reply"
+                      title="Compare reply" onClick={() => openCompare(msg)}>
+                      <Columns3 className="size-3" />
+                    </Button>
+                  ) : null}
+
                 </div>
               ) : null}
             </div>
@@ -527,17 +629,44 @@ export function SideBranchPane({
         <div ref={scrollEndRef} />
       </div>
 
-      {selectedSegments.length > 0 ? (
+      {allBlocks.length > 0 ? (
+        <div className="flex shrink-0 items-center gap-2 border-t border-border px-3.5 py-1.5">
+          <Button type="button" variant="ghost" size="xs" disabled={activeBlocks.length === allBlocks.length} onClick={() => {
+            selectionAnchor.current = null;
+            setManuallyOrdered(false);
+            setSelectedSegments(allBlocks);
+          }}>Select all blocks</Button>
+          <Button type="button" variant="ghost" size="xs" onClick={() => setExportOpen(true)}>Export</Button>
+        </div>
+      ) : null}
+      {regenerateId ? <RegenerateReplyDialog
+        rpc={rpc} target={{ branchId: branch.id, messageId: regenerateId }}
+        activeBot={activeBot} persona={activePersona}
+        fallback={{
+          provider: selectedModel.split(":")[0],
+          modelId: selectedModel.split(":").slice(1).join(":"),
+          contextMode, responseStyle, temperature: customTemp ?? undefined, maxTokens: customMaxTokens ?? undefined,
+        }}
+        onRegenerated={(reply) => {
+          setMessages((current) => current.map((message) => message.id === reply.id ? reply : message));
+          clearReplySelection(reply.id);
+        }}
+        onClose={() => setRegenerateId(undefined)}
+      /> : null}
+      {exportOpen ? <BranchExportDialog branchName={branch.name} allBlocks={allBlocks}
+        selectedBlocks={activeBlocks} onClose={() => setExportOpen(false)} /> : null}
+      {activeBlocks.length > 0 ? (
         <div className="space-y-2 border-t border-border bg-card px-3.5 py-2 text-xs">
           <div className="font-medium">
-            {selectedSegments.length} {selectedSegments.length === 1 ? "block" : "blocks"} selected
+            {activeBlocks.length} {activeBlocks.length === 1 ? "block" : "blocks"} selected
           </div>
           <ol className="rk-scroll max-h-36 space-y-1 overflow-y-auto">
-            {selectedSegments.map((block, index) => (
+            {activeBlocks.map((block, index) => (
               <li
                 key={block.blockId}
                 className="flex items-center gap-1 rounded-md border border-border px-2 py-1"
               >
+                <span className="text-muted-foreground">{index + 1}.</span>
                 <span className="min-w-0 flex-1 truncate">{block.markdown}</span>
                 <Button
                   type="button"
@@ -554,7 +683,7 @@ export function SideBranchPane({
                   size="icon-xs"
                   variant="ghost"
                   aria-label={`Move selected block ${index + 1} down`}
-                  disabled={index === selectedSegments.length - 1}
+                  disabled={index === activeBlocks.length - 1}
                   onClick={() => moveSelection(index, 1)}
                 >
                   <ArrowDown className="size-3" />
@@ -567,7 +696,11 @@ export function SideBranchPane({
               type="button"
               size="sm"
               variant="ghost"
-              onClick={() => setSelectedSegments([])}
+              onClick={() => {
+                selectionAnchor.current = null;
+                setSelectedSegments([]);
+                setManuallyOrdered(false);
+              }}
               className="h-6 px-2 text-[11px]"
             >
               Clear
@@ -575,7 +708,7 @@ export function SideBranchPane({
             <Button
               type="button"
               size="sm"
-              onClick={() => onOpenMergeReview(selectedText, selectedSegments)}
+              onClick={() => onOpenMergeReview(selectedText, activeBlocks)}
               className="h-6 gap-1 bg-success px-2.5 text-[11px] text-white hover:bg-success/90"
             >
               <GitMerge className="size-3" />

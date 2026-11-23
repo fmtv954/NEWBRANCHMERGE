@@ -126,7 +126,11 @@ export async function fleetPrepareDeps(
  * only when the provider that won the resolution above is that vendor. A provider named
  * by deployment settings or a bot override gets no key rather than another vendor's.
  */
-function deploymentKeyFor(deps: ExecutorDeps, provider: string): string | undefined {
+type ModelResolutionDeps = Pick<ExecutorDeps,
+  "prisma" | "secretStore" | "runtime" | "billingEnabled" | "deploymentModelKey" |
+  "codexCatalog" | "mcpAllowPrivateEndpoint">;
+
+function deploymentKeyFor(deps: ModelResolutionDeps, provider: string): string | undefined {
   if (!deps.deploymentModelKey) return undefined;
   return provider === resolveDeploymentModel().provider ? deps.deploymentModelKey : undefined;
 }
@@ -235,7 +239,7 @@ export async function resolveModelKey(...args: Parameters<typeof resolveModelKey
 }
 
 async function resolveModelKeyMaterial(
-  deps: ExecutorDeps,
+  deps: ModelResolutionDeps,
   userId: string,
   spaceId: string,
   credential: {
@@ -468,7 +472,7 @@ export function resolvedModelRunFields(
  * The connection is returned with the key so a run can record which one served it.
  */
 export async function resolveConnectedModelKey(
-  deps: ExecutorDeps,
+  deps: ModelResolutionDeps,
   scope: { userId: string; spaceId: string },
   provider: string,
   modelId: string,
@@ -527,7 +531,7 @@ export async function resolveConnectedModelKey(
 }
 
 export async function resolveConnectedRunModel(
-  deps: ExecutorDeps,
+  deps: ModelResolutionDeps,
   scope: { userId: string; spaceId: string },
   provider: string,
   modelId: string,
