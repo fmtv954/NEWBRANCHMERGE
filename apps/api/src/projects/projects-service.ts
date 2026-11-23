@@ -257,7 +257,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
     if (!branch) throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
     const project = await requireProjectAccess(prisma, actor, branch.projectId, "editor");
     const message = await prisma.message.findFirst({
-      where: { id: input.messageId, threadId: branch.threadId, role: "assistant" },
+      where: { id: input.messageId, threadId: branch.threadId, role: { in: ["assistant", "bot"] } },
     });
     if (!message) throw new ORPCError("NOT_FOUND", { message: "Reply not found" });
     return { branch, message, project };
@@ -1782,7 +1782,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       });
 
       const messages = rows
-        .filter((r) => r.role === "user" || r.role === "assistant")
+        .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "bot")
         .map((r) => {
           const blocks = Array.isArray(r.blocks)
             ? (r.blocks as Array<Record<string, unknown>>)
@@ -1793,7 +1793,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
           const modelLabelBlock = blocks.find((b) => typeof b.modelLabel === "string");
           return {
             id: r.id,
-            role: r.role as "user" | "assistant",
+            role: (r.role === "user" ? "user" : "assistant") as "user" | "assistant",
             text: textParts.join("\n\n"),
             modelLabel:
               typeof modelLabelBlock?.modelLabel === "string"
@@ -1921,11 +1921,12 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
           });
           const refLines: string[] = [];
           for (const pm of parentMsgs) {
-            if (pm.role !== "user" && pm.role !== "assistant") continue;
+            if (pm.role !== "user" && pm.role !== "assistant" && pm.role !== "bot") continue;
             const txt = extractTextFromBlocks(pm.blocks);
             if (txt) {
               const trimmed = txt.length > 1600 ? `${txt.slice(0, 1600)}…` : txt;
-              refLines.push(`[${pm.role.toUpperCase()}]: ${trimmed}`);
+              const roleLabel = pm.role === "user" ? "USER" : "ASSISTANT";
+              refLines.push(`[${roleLabel}]: ${trimmed}`);
             }
           }
           if (refLines.length > 0) {
@@ -1945,9 +1946,9 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         select: { role: true, blocks: true },
       });
       for (const sm of priorSideMsgs.reverse()) {
-        if (sm.role !== "user" && sm.role !== "assistant") continue;
+        if (sm.role !== "user" && sm.role !== "assistant" && sm.role !== "bot") continue;
         const txt = extractTextFromBlocks(sm.blocks);
-        if (txt) llmMessages.push({ role: sm.role, content: txt });
+        if (txt) llmMessages.push({ role: sm.role === "user" ? "user" : "assistant", content: txt });
       }
       llmMessages.push({ role: "user", content: promptText });
 
@@ -2052,7 +2053,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       if (!promptRow || !prompt.trim()) throw new ORPCError("CONFLICT", { message: "The original text prompt is unavailable." });
 
       const rows = await prisma.message.findMany({
-        where: { threadId: branch.threadId, seq: { lt: promptRow.seq }, role: { in: ["user", "assistant"] } },
+        where: { threadId: branch.threadId, seq: { lt: promptRow.seq }, role: { in: ["user", "assistant", "bot"] } },
         orderBy: { seq: "desc" }, take: 30, select: { role: true, blocks: true },
       });
       const focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data?.quoteText;
@@ -2071,7 +2072,9 @@ ${inherited}` : "",
         prompt,
         history: rows.reverse().flatMap((row) => {
           const content = extractTextFromBlocks(row.blocks);
-          return content && (row.role === "user" || row.role === "assistant") ? [{ role: row.role, content }] : [];
+          return content && (row.role === "user" || row.role === "assistant" || row.role === "bot")
+            ? [{ role: (row.role === "user" ? "user" : "assistant") as "user" | "assistant", content }]
+            : [];
         }),
       });
       const nextBlocks = blocks.flatMap((block, index) => {
@@ -2159,7 +2162,7 @@ ${inherited}` : "",
         const ids = [...new Set(source.blocks.map(({ messageId }) => messageId))];
         if (ids.length) {
           const found = await prisma.message.count({
-            where: { id: { in: ids }, threadId: branch.threadId, role: "assistant" },
+            where: { id: { in: ids }, threadId: branch.threadId, role: { in: ["assistant", "bot"] } },
           });
           if (found !== ids.length) throw new ORPCError("BAD_REQUEST", { message: "A selected reply is no longer in this branch." });
         }
@@ -2167,12 +2170,14 @@ ${inherited}` : "",
         if (source.contextMode === "through_message") {
           if (branch.forkOrigin) inherited = await branchReferenceContext(prisma, branch.forkOrigin);
           const rows = await prisma.message.findMany({
-            where: { threadId: branch.threadId, role: { in: ["user", "assistant"] } },
+            where: { threadId: branch.threadId, role: { in: ["user", "assistant", "bot"] } },
             orderBy: { seq: "desc" }, take: 12, select: { role: true, blocks: true },
           });
           history = rows.reverse().flatMap(({ role, blocks }) => {
             const content = extractTextFromBlocks(blocks).slice(0, 2000);
-            return content && (role === "assistant" || role === "user") ? [{ content, role }] : [];
+            return content && (role === "assistant" || role === "bot" || role === "user")
+              ? [{ content, role: (role === "user" ? "user" : "assistant") as "user" | "assistant" }]
+              : [];
           });
         }
       }
@@ -2388,16 +2393,29 @@ ${inherited}` : "",
       const selection = SelectionBlockRangeSchema.safeParse(savedSelection).data;
       const originMessageId = sourceBranch.forkOrigin?.sourceMessageId;
       const resolvedTargetId = input.previewBase?.messageId ?? originMessageId ?? undefined;
-      const targetMsg = await prisma.message.findFirst({
-        where: {
-          threadId: targetBranch.threadId,
-          ...(resolvedTargetId ? { id: resolvedTargetId } : { role: "assistant" }),
-        },
-        orderBy: { seq: "desc" },
-        select: { id: true, blocks: true, activeRevisionId: true },
-      });
-      if (!targetMsg || (originMessageId && targetMsg.id !== originMessageId)) {
-        throw new ORPCError("CONFLICT", { message: "The destination message in Main is missing." });
+      let targetMsg = resolvedTargetId
+        ? await prisma.message.findFirst({
+            where: { threadId: targetBranch.threadId, id: resolvedTargetId },
+            select: { id: true, blocks: true, activeRevisionId: true },
+          })
+        : null;
+      if (!targetMsg && !input.previewBase?.messageId) {
+        // Fall back to the latest AI message in Main (Main replies use role="bot"; side/test replies may use role="assistant").
+        targetMsg = await prisma.message.findFirst({
+          where: {
+            threadId: targetBranch.threadId,
+            role: { in: ["assistant", "bot"] },
+          },
+          orderBy: { seq: "desc" },
+          select: { id: true, blocks: true, activeRevisionId: true },
+        });
+      }
+      if (!targetMsg) {
+        throw new ORPCError("CONFLICT", {
+          message: input.previewBase?.messageId
+            ? "The destination message in Main is missing."
+            : "Main chat has no AI replies yet. Send a message in Main first, then merge this branch.",
+        });
       }
 
       const blocks = MergeMessageBlocksSchema.safeParse(targetMsg.blocks).data;
@@ -2474,7 +2492,7 @@ ${inherited}` : "",
       if (sourceBlocks) {
         const messageIds = [...new Set(sourceBlocks.map((block) => block.messageId))];
         const count = await prisma.message.count({
-          where: { id: { in: messageIds }, threadId: sourceBranch.threadId, role: "assistant" },
+          where: { id: { in: messageIds }, threadId: sourceBranch.threadId, role: { in: ["assistant", "bot"] } },
         });
         if (count !== messageIds.length) {
           throw new ORPCError("CONFLICT", {
@@ -2669,12 +2687,12 @@ async function branchReferenceContext(
   if (!parent) return "";
   const rows = await prisma.message.findMany({
     where: {
-      threadId: parent.threadId, role: { in: ["user", "assistant"] },
+      threadId: parent.threadId, role: { in: ["user", "assistant", "bot"] },
       ...(origin.inheritedUpToSeq > 0 ? { seq: { lte: origin.inheritedUpToSeq } } : {}),
     },
     orderBy: { seq: "desc" }, take: 16, select: { role: true, blocks: true },
   });
-  return rows.reverse().map(({ role, blocks }) => `[${role}]: ${extractTextFromBlocks(blocks).slice(0, 1600)}`).join("\n\n");
+  return rows.reverse().map(({ role, blocks }) => `[${role === "user" ? "user" : "assistant"}]: ${extractTextFromBlocks(blocks).slice(0, 1600)}`).join("\n\n");
 }
 
 function extractTextFromBlocks(rawBlocks: unknown): string {
