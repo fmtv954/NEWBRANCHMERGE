@@ -796,6 +796,37 @@ export async function sendThreadMessage(
           }
           return { message, runs: [active], routineRuns, eventSeq: event.seq };
         }
+        const activeBranch = await tx.branch.findFirst({
+          where: { threadId: target.threadId, archivedAt: null },
+          select: { id: true },
+        });
+        let keptContextBlock = "";
+        if (activeBranch) {
+          const keptPlacements = await tx.placement.findMany({
+            where: {
+              targetBranchId: activeBranch.id,
+              removedAt: null,
+              OR: [{ useInNextMessage: true }, { pinnedAsContext: true }],
+            },
+            orderBy: { sortOrder: "asc" },
+            select: { id: true, label: true, excerptText: true, useInNextMessage: true },
+          });
+          if (keptPlacements.length > 0) {
+            keptContextBlock = [
+              "Included kept context from branch placements:",
+              ...keptPlacements.map(
+                (p) => `- [${p.label}]: ${(p.excerptText ?? "").trim().slice(0, 2000)}`,
+              ),
+            ].join("\n");
+            const oneShotIds = keptPlacements.filter((p) => p.useInNextMessage).map((p) => p.id);
+            if (oneShotIds.length > 0) {
+              await tx.placement.updateMany({
+                where: { id: { in: oneShotIds } },
+                data: { useInNextMessage: false },
+              });
+            }
+          }
+        }
         const task = await tx.task.create({
           data: {
             spaceId: actor.spaceId,
@@ -803,10 +834,14 @@ export async function sendThreadMessage(
             threadId: target.threadId,
             userId: actor.userId,
             prompt: [
-              input.personaPrompt?.trim() ? `Use this model persona for this reply:
-${input.personaPrompt.trim()}` : "",
+              input.personaPrompt?.trim()
+                ? `Use this model persona for this reply:\n${input.personaPrompt.trim()}`
+                : "",
+              keptContextBlock,
               buildSendPrompt(input.text, artifacts, connectorNames),
-            ].filter(Boolean).join("\n\n"),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
             status: "queued",
           },
         });

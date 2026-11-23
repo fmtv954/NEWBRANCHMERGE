@@ -2,6 +2,7 @@ import type { Actor, BillingRoute } from "@rakazo/contracts";
 import type { LiveDashboardSnapshot } from "@rakazo/core";
 import { buildLiveDashboardSnapshot } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
+import { requireProjectAccess } from "../projects/projects-service.js";
 
 /**
  * Requirement #47: Deterministic Private Live Dashboard refresh service.
@@ -20,6 +21,15 @@ export async function computeLiveDashboardSnapshot(
   },
 ): Promise<LiveDashboardSnapshot> {
   const since = input.since ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  if (input.projectId) {
+    await requireProjectAccess(prisma, actor, input.projectId, "viewer");
+  }
+  const accessibleProjectFilter = input.projectId
+    ? { id: input.projectId, spaceId: actor.spaceId }
+    : {
+        spaceId: actor.spaceId,
+        OR: [{ ownerUserId: actor.userId }, { members: { some: { userId: actor.userId } } }],
+      };
 
   const [usageRows, holdRows, approvedPlacements, approvedTakes] = await Promise.all([
     prisma.usageRecord.findMany({
@@ -47,7 +57,7 @@ export async function computeLiveDashboardSnapshot(
     }),
     prisma.placement.count({
       where: {
-        ...(input.projectId ? { projectId: input.projectId } : {}),
+        project: accessibleProjectFilter,
         removedAt: null,
         insertedAt: { gte: since },
       },
@@ -56,6 +66,7 @@ export async function computeLiveDashboardSnapshot(
       where: {
         status: "approved",
         createdAt: { gte: since },
+        shot: { scene: { episode: { project: accessibleProjectFilter } } },
       },
     }),
   ]);

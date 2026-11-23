@@ -522,6 +522,27 @@ export async function deleteArtifactFamily(
   if (!anchor) throw new IsolationError();
   const rootId = anchor.rootArtifactId ?? anchor.id;
 
+  // Guard retained placements so deleting an artifact family never leaves a broken 404 reference.
+  const familyRows = await deps.prisma.artifact.findMany({
+    where: {
+      spaceId: actor.spaceId,
+      OR: [{ id: rootId }, { rootArtifactId: rootId }],
+    },
+    select: { id: true },
+  });
+  const familyIds = familyRows.map((row) => row.id);
+  if (familyIds.length > 0) {
+    const retainedCount = await deps.prisma.placement.count({
+      where: { artifactId: { in: familyIds }, removedAt: null },
+    });
+    if (retainedCount > 0) {
+      throw new ClientError(
+        "CONFLICT",
+        "This file is retained by an active placement in Main. Remove the kept placement before deleting it.",
+      );
+    }
+  }
+
   for (;;) {
     const members = await deps.prisma.artifact.findMany({
       where: {

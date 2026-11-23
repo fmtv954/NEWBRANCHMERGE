@@ -9,23 +9,24 @@ import type {
   ShotTake,
 } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
+import { requireProjectAccess } from "../projects/projects-service.js";
 
 function toIso(d: Date): string {
   return d.toISOString();
 }
 
 export function createMicrodramaService(prisma: PrismaClient) {
-  async function requireProject(actor: Actor, projectId: string) {
-    const project = await prisma.project.findFirst({
-      where: { id: projectId, spaceId: actor.spaceId },
-    });
-    if (!project) throw new ORPCError("NOT_FOUND", { message: "Project not found" });
-    return project;
+  async function requireProject(
+    actor: Actor,
+    projectId: string,
+    minRole: "viewer" | "editor" = "viewer",
+  ) {
+    return requireProjectAccess(prisma, actor, projectId, minRole);
   }
 
   return {
     async listEpisodes(actor: Actor, projectId: string): Promise<Episode[]> {
-      await requireProject(actor, projectId);
+      await requireProject(actor, projectId, "viewer");
       const rows = await prisma.episode.findMany({
         where: { projectId },
         orderBy: { createdAt: "asc" },
@@ -54,7 +55,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
         targetDurationSec: number;
       },
     ): Promise<Episode> {
-      await requireProject(actor, input.projectId);
+      await requireProject(actor, input.projectId, "editor");
       const r = await prisma.episode.create({
         data: {
           projectId: input.projectId,
@@ -86,6 +87,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
       if (!episode || episode.project.spaceId !== actor.spaceId) {
         throw new ORPCError("NOT_FOUND", { message: "Episode not found" });
       }
+      await requireProject(actor, episode.projectId, "viewer");
 
       const [chars, props, scenes] = await Promise.all([
         prisma.characterRef.findMany({
@@ -232,7 +234,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
         wardrobeNotes: string;
       },
     ): Promise<CharacterRef> {
-      await requireProject(actor, input.projectId);
+      await requireProject(actor, input.projectId, "editor");
       const r = await prisma.characterRef.upsert({
         where: {
           projectId_stableCode: { projectId: input.projectId, stableCode: input.stableCode },
@@ -285,7 +287,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
         referenceArtifactIds: string[];
       },
     ): Promise<PropLocationRef> {
-      await requireProject(actor, input.projectId);
+      await requireProject(actor, input.projectId, "editor");
       const r = await prisma.propLocationRef.upsert({
         where: {
           projectId_stableCode: { projectId: input.projectId, stableCode: input.stableCode },
@@ -337,6 +339,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
       if (!ep || ep.project.spaceId !== actor.spaceId) {
         throw new ORPCError("NOT_FOUND", { message: "Episode not found" });
       }
+      await requireProject(actor, ep.projectId, "editor");
       const r = await prisma.scene.create({
         data: {
           episodeId: input.episodeId,
@@ -380,6 +383,7 @@ export function createMicrodramaService(prisma: PrismaClient) {
       if (!sc || sc.episode.project.spaceId !== actor.spaceId) {
         throw new ORPCError("NOT_FOUND", { message: "Scene not found" });
       }
+      await requireProject(actor, sc.episode.projectId, "editor");
       const r = await prisma.shot.upsert({
         where: {
           sceneId_stableShotCode: { sceneId: input.sceneId, stableShotCode: input.stableShotCode },

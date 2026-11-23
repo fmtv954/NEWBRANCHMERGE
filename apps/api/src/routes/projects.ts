@@ -125,6 +125,9 @@ export function projectsRoutes(ctx: RouterContext) {
       undo: authed.merges.undo.handler(({ context, input }) =>
         service.undoMerge(context.actor, input),
       ),
+      listReceipts: authed.merges.listReceipts.handler(({ context, input }) =>
+        service.listMergeReceipts(context.actor, input.projectId),
+      ),
       executeStrategy: authed.merges.executeStrategy.handler(({ context, input }) =>
         service.executeMergeStrategy(context.actor, input),
       ),

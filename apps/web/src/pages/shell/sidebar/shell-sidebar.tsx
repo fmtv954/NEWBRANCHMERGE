@@ -1,6 +1,6 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import type { Bot, Branch, Group, NavLink, Project } from "@rakazo/contracts";
-import { accountDisplay } from "@rakazo/core";
+import { accountDisplay, inferAttachmentMimeType } from "@rakazo/core";
 import {
   Button,
   Input,
@@ -10,7 +10,21 @@ import {
   InputGroupInput,
   Sidebar,
 } from "@rakazo/ui-web";
-import { BookOpen, ChevronDown, ChevronRight, FileUp, Film, FolderInput, FolderKanban, GitBranch, MessageSquarePlus, Plus, Search, SlidersHorizontal, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  FileUp,
+  Film,
+  FolderInput,
+  FolderKanban,
+  GitBranch,
+  MessageSquarePlus,
+  Plus,
+  Search,
+  SlidersHorizontal,
+  Trash2,
+} from "lucide-react";
 import type { ReactNode, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { PasskeyOffer } from "../../../components/account/PasskeyOffer";
@@ -20,6 +34,7 @@ import { CreateOrganizationDialog } from "../../../components/spaces/CreateOrgan
 import { InviteDialog } from "../../../components/spaces/InviteDialog";
 import { useSignOut } from "../../../lib/auth/sign-out";
 import { formatBillingDate } from "../../../lib/billing/billing";
+import { readFileAsBase64 } from "../../../lib/composer/pending-attachments";
 import type { BotsSidebarDensity } from "../../../lib/preferences/bots-sidebar-density-pref";
 import { useQueryUserId } from "../../../lib/query/query";
 import type { createSpaceRpc } from "../../../lib/query/rpc";
@@ -698,10 +713,16 @@ function ProjectsAndChatsShelf({
     try {
       const cleanName = file.name.replace(/\.[^.]+$/, "").slice(0, 48) || "Uploaded Document";
       const created = await rpc.projects.createIndependentChat({ title: cleanName });
-      let textPreview = "";
-      if (file.type.startsWith("text/") || /\.(md|txt|csv|json|ts|tsx|js|py|html|css)$/i.test(file.name)) {
-        textPreview = (await file.text()).slice(0, 12_000);
-      }
+      const mimeType =
+        inferAttachmentMimeType(file.name, file.type) ?? (file.type || "application/octet-stream");
+      const contentBase64 = await readFileAsBase64(file);
+      const artifact = await rpc.artifacts.create({
+        botId: created.assistantBotId,
+        name: file.name,
+        mimeType,
+        contentBase64,
+        clientNonce: `upload:${created.assistantBotId}:${crypto.randomUUID()}`,
+      });
       setIndependentChats((prev) => [
         {
           threadId: created.threadId,
@@ -712,12 +733,10 @@ function ProjectsAndChatsShelf({
       ]);
       await onRefreshBots?.();
       onOpenChat(created.assistantBotId);
-      const introPrompt = textPreview
-        ? `I uploaded "${file.name}". Please summarize the key points and let me know what we can explore:\n\n\`\`\`\n${textPreview}\n\`\`\``
-        : `I uploaded "${file.name}" (${Math.max(1, Math.round(file.size / 1024))} KB). Let's start a focused conversation about this document.`;
       await rpc.threads.send({
         botId: created.assistantBotId,
-        text: introPrompt,
+        text: `I uploaded "${file.name}". Please review the attached file, summarize its key points, and suggest what we should explore next.`,
+        artifactIds: [artifact.id],
         clientNonce: crypto.randomUUID(),
       });
     } finally {
@@ -856,7 +875,11 @@ function ProjectsAndChatsShelf({
           onClick={() => onToggleSection("clone-projects")}
           className="flex w-full items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
         >
-          {projectsCollapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+          {projectsCollapsed ? (
+            <ChevronRight className="size-3" />
+          ) : (
+            <ChevronDown className="size-3" />
+          )}
           <span>Projects</span>
           <span className="ml-auto text-[10px]">{projects.length}</span>
         </button>
@@ -919,7 +942,11 @@ function ProjectsAndChatsShelf({
             onClick={() => onToggleSection("clone-independent-chats")}
             className="flex w-full items-center gap-1 px-1.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground"
           >
-            {chatsCollapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+            {chatsCollapsed ? (
+              <ChevronRight className="size-3" />
+            ) : (
+              <ChevronDown className="size-3" />
+            )}
             <span>Independent Chats</span>
             <span className="ml-auto text-[10px]">{independentChats.length}</span>
           </button>

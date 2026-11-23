@@ -1,7 +1,15 @@
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
 import type { Bot } from "@rakazo/contracts";
 import { buildSmartSegments, computeWordDiff } from "@rakazo/core";
-import { Badge, Button, Checkbox, Dialog, DialogContent, DialogTitle, Textarea } from "@rakazo/ui-web";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Textarea,
+} from "@rakazo/ui-web";
 import {
   Award,
   Check,
@@ -92,12 +100,16 @@ export function CompareModelsArena({
   const [error, setError] = useState<string | null>(null);
 
   const modalityModels = useMemo(
-    () => allRows.filter((row) => row.kind === modality && (modality !== "text" || row.status !== "needs_key")),
+    () =>
+      allRows.filter(
+        (row) => row.kind === modality && (modality !== "text" || row.status !== "needs_key"),
+      ),
     [allRows, modality],
   );
 
-  const activeKeys = selectedKeys?.filter((key) => modalityModels.some((model) => model.key === key))
-    ?? modalityModels.slice(0, 2).map(({ key }) => key);
+  const activeKeys =
+    selectedKeys?.filter((key) => modalityModels.some((model) => model.key === key)) ??
+    modalityModels.slice(0, 2).map(({ key }) => key);
 
   function toggleModelKey(key: string) {
     if (activeKeys.includes(key)) {
@@ -135,11 +147,16 @@ export function CompareModelsArena({
         const res = await rpc.branches.compareRun({
           prompt: q,
           personaPrompt: source?.settings.personaPrompt,
-          source: source ? {
-            branchId: source.branchId, blocks: source.blocks,
-            contextMode: source.settings.contextMode, responseStyle: source.settings.responseStyle,
-            temperature: source.settings.temperature, maxTokens: source.settings.maxTokens,
-          } : undefined,
+          source: source
+            ? {
+                branchId: source.branchId,
+                blocks: source.blocks,
+                contextMode: source.settings.contextMode,
+                responseStyle: source.settings.responseStyle,
+                temperature: source.settings.temperature,
+                maxTokens: source.settings.maxTokens,
+              }
+            : undefined,
           models: chosen.map((m) => ({
             provider: m.provider,
             modelId: m.modelId,
@@ -153,8 +170,8 @@ export function CompareModelsArena({
           chosen.map(async (m) => {
             const started = Date.now();
             try {
+              // Keep candidate renders isolated outside Main/Side threads until user clicks Keep/Merge
               const res = await rpc.media.generate({
-                threadId: threadId ?? undefined,
                 provider: m.provider as
                   | "openai"
                   | "xai"
@@ -165,18 +182,26 @@ export function CompareModelsArena({
                   | "higgsfield",
                 modelId: m.modelId,
                 kind: modality === "video" ? "video_gen" : "image_gen",
-                prompt: [q, source?.blocks.map(({ markdown }) => markdown).join("\n\n")].filter(Boolean).join("\n\n"),
+                prompt: [q, source?.blocks.map(({ markdown }) => markdown).join("\n\n")]
+                  .filter(Boolean)
+                  .join("\n\n"),
               });
               const firstUrl =
+                ("outputUrl" in res && typeof res.outputUrl === "string" ? res.outputUrl : null) ??
                 ("url" in res && typeof res.url === "string" ? res.url : null) ??
                 ("urls" in res && Array.isArray(res.urls) && typeof res.urls[0] === "string"
                   ? res.urls[0]
                   : null);
+              const status = "status" in res && typeof res.status === "string" ? res.status : null;
               return {
                 provider: m.provider,
                 modelId: m.modelId,
                 displayName: m.displayName,
                 url: firstUrl,
+                error:
+                  !firstUrl && status && status !== "completed"
+                    ? `Job ${status} — waiting for provider completion.`
+                    : undefined,
                 latencyMs: Date.now() - started,
               };
             } catch (err) {
@@ -201,18 +226,28 @@ export function CompareModelsArena({
   }
 
   async function handleRunJudge() {
-    const candidates = textResults.flatMap((result, index) => result.error ? [] : [{ result, index }]);
+    const candidates = textResults.flatMap((result, index) =>
+      result.error ? [] : [{ result, index }],
+    );
     if (candidates.length < 2 || judging) return;
     setJudging(true);
     try {
+      const judgeModel = candidates[0]?.result;
       const res = await rpc.branches.judgeCompare({
         prompt: prompt.trim(),
-        candidates: candidates.map(({ result }) => ({ modelLabel: result.displayName, text: result.text })),
+        candidates: candidates.map(({ result }) => ({
+          modelLabel: result.displayName,
+          text: result.text,
+        })),
+        ...(judgeModel ? { provider: judgeModel.provider, modelId: judgeModel.modelId } : {}),
       });
       setVerdict({
         ...res,
         winnerIndex: candidates[res.winnerIndex]?.index ?? -1,
-        scores: res.scores.map((score) => ({ ...score, index: candidates[score.index]?.index ?? -1 })),
+        scores: res.scores.map((score) => ({
+          ...score,
+          index: candidates[score.index]?.index ?? -1,
+        })),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Judge failed");
@@ -225,7 +260,10 @@ export function CompareModelsArena({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton={false} className="flex h-[88vh] w-[92vw] max-w-[92vw] sm:max-w-[92vw] flex-col overflow-hidden border border-border bg-card p-0 text-foreground">
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-[88vh] w-[92vw] max-w-[92vw] sm:max-w-[92vw] flex-col overflow-hidden border border-border bg-card p-0 text-foreground"
+      >
         {/* Header */}
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
           <div className="flex items-center gap-2">
@@ -277,7 +315,11 @@ export function CompareModelsArena({
           <details className="shrink-0 border-b border-border px-5 py-2 text-xs">
             <summary className="cursor-pointer">Source blocks ({source.blocks.length})</summary>
             <ol className="max-h-32 list-decimal space-y-1 overflow-y-auto pl-5 pt-2">
-              {source.blocks.map((block) => <li key={block.blockId}><ChatMarkdown>{block.markdown}</ChatMarkdown></li>)}
+              {source.blocks.map((block) => (
+                <li key={block.blockId}>
+                  <ChatMarkdown>{block.markdown}</ChatMarkdown>
+                </li>
+              ))}
             </ol>
           </details>
         ) : null}
@@ -311,7 +353,9 @@ export function CompareModelsArena({
           </div>
 
           {modality === "text" && modalityModels.length < 2 ? (
-            <p className="text-xs text-muted-foreground">Connect at least two text models to compare.</p>
+            <p className="text-xs text-muted-foreground">
+              Connect at least two text models to compare.
+            </p>
           ) : null}
           <div className="flex items-end gap-2">
             <Textarea
@@ -422,7 +466,9 @@ export function CompareModelsArena({
 
               <div
                 className={`grid gap-4 ${
-                  textResults.length >= 3 ? "grid-cols-1 lg:grid-cols-3" : "grid-cols-1 md:grid-cols-2"
+                  textResults.length >= 3
+                    ? "grid-cols-1 lg:grid-cols-3"
+                    : "grid-cols-1 md:grid-cols-2"
                 }`}
               >
                 {textResults.map((res, idx) => {
@@ -464,7 +510,11 @@ export function CompareModelsArena({
                       ) : null}
 
                       <div className="flex-1 space-y-1.5 text-xs">
-                        {res.error ? <p role="alert" className="text-destructive">{res.error}</p> : showDiff && idx > 0 ? (
+                        {res.error ? (
+                          <p role="alert" className="text-destructive">
+                            {res.error}
+                          </p>
+                        ) : showDiff && idx > 0 ? (
                           <div className="whitespace-pre-wrap leading-relaxed">
                             {computeWordDiff(baseText, res.text).map((tok, tIdx) => (
                               <span
@@ -486,9 +536,9 @@ export function CompareModelsArena({
                             const segKey = `cmp_${idx}_${sIdx}`;
                             const checked = Boolean(pickedSegments[segKey]);
                             return (
-                              <div
+                              <label
                                 key={segKey}
-                                onClick={() => toggleSegment(segKey, seg.markdown)}
+                                htmlFor={segKey}
                                 className={`flex cursor-pointer items-start gap-2 rounded-lg px-1.5 py-1 transition-colors ${
                                   checked
                                     ? "bg-success/15 ring-1 ring-success/50"
@@ -496,15 +546,15 @@ export function CompareModelsArena({
                                 }`}
                               >
                                 <Checkbox
+                                  id={segKey}
                                   checked={checked}
                                   onCheckedChange={() => toggleSegment(segKey, seg.markdown)}
-                                  onClick={(e) => e.stopPropagation()}
                                   className="mt-1 shrink-0"
                                 />
                                 <div className="min-w-0 flex-1">
                                   <ChatMarkdown>{seg.markdown}</ChatMarkdown>
                                 </div>
-                              </div>
+                              </label>
                             );
                           })
                         )}
@@ -552,7 +602,9 @@ export function CompareModelsArena({
                           controls
                           loop
                           className="max-h-72 w-full rounded-lg object-contain"
-                        />
+                        >
+                          <track kind="captions" />
+                        </video>
                       ) : (
                         <img
                           src={res.url}

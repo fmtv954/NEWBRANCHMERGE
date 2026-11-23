@@ -133,23 +133,21 @@ export const projectsRpc = {
           updatedMarkdown: z.string(),
         }),
       ),
-    listMessageRevisions: oc
-      .input(z.object({ messageId: Id }))
-      .output(
-        z.object({
-          messageId: Id,
-          activeRevisionId: Id.nullable(),
-          revisions: z.array(
-            z.object({
-              id: Id,
-              version: z.number().int().positive(),
-              canonicalText: z.string(),
-              sourceAction: z.string(),
-              createdAt: z.string(),
-            }),
-          ),
-        }),
-      ),
+    listMessageRevisions: oc.input(z.object({ messageId: Id })).output(
+      z.object({
+        messageId: Id,
+        activeRevisionId: Id.nullable(),
+        revisions: z.array(
+          z.object({
+            id: Id,
+            version: z.number().int().positive(),
+            canonicalText: z.string(),
+            sourceAction: z.string(),
+            createdAt: z.string(),
+          }),
+        ),
+      }),
+    ),
     restoreMessageRevision: oc
       .input(
         z.object({
@@ -237,23 +235,21 @@ export const projectsRpc = {
           branchB: BranchSchema,
         }),
       ),
-    messages: oc
-      .input(z.object({ branchId: Id }))
-      .output(
-        z.object({
-          branchId: Id,
-          threadId: Id,
-          messages: z.array(
-            z.object({
-              id: Id,
-              role: z.enum(["user", "assistant"]),
-              text: z.string(),
-              modelLabel: z.string().optional(),
-              createdAt: z.string(),
-            }),
-          ),
-        }),
-      ),
+    messages: oc.input(z.object({ branchId: Id })).output(
+      z.object({
+        branchId: Id,
+        threadId: Id,
+        messages: z.array(
+          z.object({
+            id: Id,
+            role: z.enum(["user", "assistant"]),
+            text: z.string(),
+            modelLabel: z.string().optional(),
+            createdAt: z.string(),
+          }),
+        ),
+      }),
+    ),
     send: oc
       .input(
         z.object({
@@ -288,35 +284,41 @@ export const projectsRpc = {
         }),
       ),
     regenerationDefaults: oc.input(replyTarget).output(ReplyGenerationSelectionSchema.nullable()),
-    regenerate: oc.input(replyTarget.extend({
-      settings: ReplyGenerationSelectionSchema,
-      idempotencyKey: z.string().min(1).max(200),
-    })).output(z.object({
-      id: Id,
-      role: z.literal("assistant"),
-      text: z.string(),
-      modelLabel: z.string(),
-      createdAt: z.string(),
-    })),
+    regenerate: oc
+      .input(
+        replyTarget.extend({
+          settings: ReplyGenerationSelectionSchema,
+          idempotencyKey: z.string().min(1).max(200),
+        }),
+      )
+      .output(
+        z.object({
+          id: Id,
+          role: z.literal("assistant"),
+          text: z.string(),
+          modelLabel: z.string(),
+          createdAt: z.string(),
+        }),
+      ),
     rename: oc
       .input(z.object({ branchId: Id, name: z.string().min(1).max(200) }))
       .output(BranchSchema),
-    archive: oc
-      .input(z.object({ branchId: Id, archived: z.boolean() }))
-      .output(BranchSchema),
+    archive: oc.input(z.object({ branchId: Id, archived: z.boolean() })).output(BranchSchema),
     compareRun: oc
       .input(
         z.object({
           prompt: z.string().min(1).max(20_000),
           personaPrompt: z.string().max(8_000).optional(),
-          source: z.object({
-            branchId: Id,
-            blocks: z.array(MergeSourceBlockSchema).max(1000),
-            contextMode: BranchContextModeSchema,
-            responseStyle: z.enum(["direct", "balanced", "deep"]).optional(),
-            temperature: z.number().min(0).max(2).optional(),
-            maxTokens: z.number().int().min(64).max(8_192).optional(),
-          }).optional(),
+          source: z
+            .object({
+              branchId: Id,
+              blocks: z.array(MergeSourceBlockSchema).max(1000),
+              contextMode: BranchContextModeSchema,
+              responseStyle: z.enum(["direct", "balanced", "deep"]).optional(),
+              temperature: z.number().min(0).max(2).optional(),
+              maxTokens: z.number().int().min(64).max(8_192).optional(),
+            })
+            .optional(),
           models: z
             .array(
               z.object({
@@ -357,6 +359,8 @@ export const projectsRpc = {
             )
             .min(2)
             .max(4),
+          provider: z.string().min(1).max(60).optional(),
+          modelId: z.string().min(1).max(160).optional(),
         }),
       )
       .output(
@@ -467,6 +471,14 @@ export const projectsRpc = {
         }),
       )
       .output(MergeReceiptSchema),
+    listReceipts: oc.input(z.object({ projectId: Id })).output(
+      z.array(
+        z.object({
+          receipt: MergeReceiptSchema,
+          targetMessageId: z.string().nullable(),
+        }),
+      ),
+    ),
     executeStrategy: oc
       .input(
         z.object({

@@ -170,7 +170,12 @@ export const MessageView = memo(function MessageView({
   onOpenRearrangeCanvas?: (messageId: string, markdown: string, blockIndex: number) => void;
   onRegenerate?: (message: ThreadMessage) => void;
   onUndoMerge?: () => Promise<void> | void;
-  onBranchBlockText?: (message: ThreadMessage, quote: string, sourceMarkdown: string) => void;
+  onBranchBlockText?: (
+    message: ThreadMessage,
+    quote: string,
+    sourceMarkdown: string,
+    anchor?: { startUtf16: number; endUtf16: number },
+  ) => void;
 }) {
   const { t } = useLingui();
   const [localBlockReview, setLocalBlockReview] = useState(false);
@@ -315,7 +320,7 @@ export const MessageView = memo(function MessageView({
           branchId={branchId}
           onBranchSegment={
             onBranchBlockText
-              ? (quote) => onBranchBlockText(message, quote, storedBlock.text)
+              ? (quote, anchor) => onBranchBlockText(message, quote, storedBlock.text, anchor)
               : undefined
           }
           onCommitMarkdown={onCommitMessageMarkdown}

@@ -46,17 +46,18 @@ import {
   useState,
 } from "react";
 import { useParams } from "react-router-dom";
-import { CallCard, CallReturnBar } from "../components/call/CallCard";
 import type { BranchCompareSource } from "../components/branching/branch-selection";
+import { CompareModelsArena } from "../components/branching/CompareModelsArena";
+import { MergeBranchModal } from "../components/branching/MergeBranchModal";
 import { PersonaPicker } from "../components/branching/PersonaPicker";
 import type { RegenerateTarget } from "../components/branching/RegenerateReplyDialog";
 import { RegenerateReplyDialog } from "../components/branching/RegenerateReplyDialog";
-import { CompareModelsArena } from "../components/branching/CompareModelsArena";
-import { MergeBranchModal } from "../components/branching/MergeBranchModal";
 import type { SideBranchPaneHandle } from "../components/branching/SideBranchPane";
 import { SideBranchPane } from "../components/branching/SideBranchPane";
+import { CallCard, CallReturnBar } from "../components/call/CallCard";
 import { IncomingCall } from "../components/call/IncomingCall";
 import { ComputerUpdateProgress } from "../components/computers/ComputerUpdateProgress";
+import { KnowledgeBaseDialog } from "../components/knowledge/KnowledgeBaseDialog";
 import { PageLoading } from "../components/PageLoading";
 import { PageViewHost } from "../components/pages/PageViewHost";
 import { authClient } from "../lib/auth/auth";
@@ -106,10 +107,8 @@ import { useReadAloud } from "./shell/chat/use-read-aloud";
 import { useThreadState } from "./shell/chat/use-thread-state";
 import { useThreadSync } from "./shell/chat/use-thread-sync";
 import { Composer } from "./shell/composer/composer";
-import {
-  ComposerModelPicker,
-  type SelectedMediaModel,
-} from "./shell/composer/composer-model-picker";
+import type { SelectedMediaModel } from "./shell/composer/composer-model-picker";
+import { ComposerModelPicker } from "./shell/composer/composer-model-picker";
 import { useComposerActions } from "./shell/composer/use-composer-actions";
 import { useComposerMentions } from "./shell/composer/use-composer-mentions";
 import { ComputerOverlay } from "./shell/computers/computer-overlay";
@@ -256,20 +255,19 @@ function SpaceShell() {
   const [selectionReset, setSelectionReset] = useState(0);
   const sideBranchPane = useRef<SideBranchPaneHandle>(null);
   const [reviewBlocksOpen, setReviewBlocksOpen] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [branchPlacements, setBranchPlacements] = useState<Placement[]>([]);
   const [activeMergeReview, setActiveMergeReview] = useState<MergeReview | null>(null);
-  const [mergeReceipts, setMergeReceipts] = useState<MergeReceipt[]>([]);
+  const [mergeReceipts, setMergeReceipts] = useState<
+    Array<{ receipt: MergeReceipt; targetMessageId: string | null }>
+  >([]);
 
   async function ensureGraphForActiveThread() {
     const threadId = activeSnapshot?.threadId;
     if (!threadId) return null;
     // Strictly verify that the cached graph actually belongs to the active threadId
     // so we NEVER inherit branches/context from a previously visited chat!
-    if (
-      activeProject &&
-      activeBranchId &&
-      projectBranches.some((b) => b.threadId === threadId)
-    ) {
+    if (activeProject && activeBranchId && projectBranches.some((b) => b.threadId === threadId)) {
       return { project: activeProject, branches: projectBranches, activeBranchId };
     }
     const ensured = await rpc.projects.ensureThreadGraph({
@@ -324,6 +322,7 @@ function SpaceShell() {
     messageId?: string;
     quoteText?: string;
     sourceMarkdown?: string;
+    anchor?: { startUtf16: number; endUtf16: number };
   }) {
     const graph = await ensureGraphForActiveThread();
     if (!graph) return;
@@ -333,6 +332,8 @@ function SpaceShell() {
     const source = input.sourceMarkdown;
     const first = quote && source ? source.indexOf(quote) : -1;
     const unique = Boolean(quote && source && first >= 0 && source.indexOf(quote, first + 1) < 0);
+    const startUtf16 = input.anchor?.startUtf16 ?? (unique ? first : 0);
+    const endUtf16 = input.anchor?.endUtf16 ?? (unique && quote ? first + quote.length : 0);
     const created = await rpc.branches.create({
       projectId: graph.project.id,
       sourceBranchId: mainBranch.id,
@@ -342,8 +343,8 @@ function SpaceShell() {
         ? {
             startBlockId: "text_0",
             endBlockId: "text_0",
-            startUtf16: unique ? first : 0,
-            endUtf16: unique ? first + quote.length : 0,
+            startUtf16,
+            endUtf16,
             quoteText: quote,
             textDigest: sha256Hex(source ?? quote),
           }
@@ -375,8 +376,14 @@ function SpaceShell() {
           current && list.some((b) => b.id === current) ? current : (mainB?.id ?? null),
         );
         if (mainB) {
-          const placed = await rpc.placements.list({ branchId: mainB.id }).catch(() => []);
-          if (!cancelled) setBranchPlacements(placed);
+          const [placed, receipts] = await Promise.all([
+            rpc.placements.list({ branchId: mainB.id }).catch(() => []),
+            rpc.merges.listReceipts({ projectId: activeProject.id }).catch(() => []),
+          ]);
+          if (!cancelled) {
+            setBranchPlacements(placed);
+            setMergeReceipts(receipts);
+          }
         }
       })
       .catch(() => undefined);
@@ -1263,10 +1270,8 @@ function SpaceShell() {
           setSideBranch(picked && !picked.isMain ? picked : null);
         }}
         studioOpen={panel === "microdrama-studio"}
-        onToggleStudio={() =>
-          setPanel(panel === "microdrama-studio" ? null : "microdrama-studio")
-        }
-        onOpenKnowledge={() => navigate("/space/knowledge")}
+        onToggleStudio={() => setPanel(panel === "microdrama-studio" ? null : "microdrama-studio")}
+        onOpenKnowledge={() => setKnowledgeOpen(true)}
         onRefreshBots={refreshBots}
         roster={
           <SidebarRoster
@@ -1459,15 +1464,21 @@ function SpaceShell() {
                 onRegenerateMessage={async (targetMsg) => {
                   try {
                     const graph = await ensureGraphForActiveThread();
-                    const branch = graph?.branches.find((branch) => branch.threadId === targetMsg.threadId);
+                    const branch = graph?.branches.find(
+                      (branch) => branch.threadId === targetMsg.threadId,
+                    );
                     if (!branch) throw new Error("Could not find the branch for this reply.");
                     setRegenerateTarget({ branchId: branch.id, messageId: targetMsg.id });
                   } catch (error) {
-                    toast.error(error instanceof Error ? error.message : "Could not open regeneration.");
+                    toast.error(
+                      error instanceof Error ? error.message : "Could not open regeneration.",
+                    );
                   }
                 }}
                 onDismissMergeReceipt={(receiptId) => {
-                  setMergeReceipts((prev) => prev.filter((r) => r.id !== receiptId));
+                  setMergeReceipts((prev) =>
+                    prev.filter((entry) => entry.receipt.id !== receiptId),
+                  );
                 }}
                 onBranchCreated={async (createdBranchId) => {
                   if (!activeProject?.id) return;
@@ -1534,132 +1545,138 @@ function SpaceShell() {
                   </div>
                 ) : null}
                 <Composer
-              key={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
-              draftKey={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
-              enterToSend={enterToSend}
-              sendColors={userBubble}
-              modelPicker={
-                active && !inGroup && (personaThread || showComposerModel) ? (
-                  <div className="flex min-w-0 items-center gap-2">
-                    {personaThread ? (
-                      <PersonaPicker
-                        selectedPersonaId={mainPersona?.id ?? "default"}
-                        onSelectPersona={(persona) =>
-                          setMainPersonas((current) => ({ ...current, [personaThread]: persona }))}
-                      />
-                    ) : null}
-                    {showComposerModel ? (
-                      <ComposerModelPicker
-                        bot={active}
-                        disabled={Boolean(recordingSkill)}
-                        activeMediaModel={activeMediaModel}
-                        onSelectMediaModel={setActiveMediaModel}
-                        onConnect={() => openSettings("models")}
-                        onSaved={(updated) =>
-                          setBots((current) =>
-                            current.map((bot) => (bot.id === updated.id ? updated : bot)),
-                          )
-                        }
-                      />
-                    ) : null}
-                  </div>
-                ) : undefined
-              }
-              activeName={
-                activeMediaModel
-                  ? `${activeMediaModel.kind === "image" ? "Image" : "Video"} (${activeMediaModel.displayName})`
-                  : inGroup
-                    ? (activeGroup?.name ?? activeSnapshot?.groupName)
-                    : active?.name
-              }
-              running={composerRunning}
-              disabled={Boolean(recordingSkill)}
-              pendingAttachments={composer.activePendingAttachments}
-              attachmentNotice={composer.attachmentNotice}
-              sendError={sendError}
-              imageConfirmation={composer.imageConfirmation}
-              onDraftEdited={composer.clearImageConfirmation}
-              onOpenModels={() => {
-                // A group's failed run belongs to one member; change that bot's model.
-                const failedBotId =
-                  inGroup && composer.displayedRunError ? activeSnapshot?.run?.botId : null;
-                if (active && !inGroup) {
-                  setPanel("settings");
-                  setModelFocusRequest(Date.now());
-                } else if (failedBotId) {
-                  openChatSettings("bot", failedBotId);
-                  setModelFocusRequest(Date.now());
-                } else openSettings("models");
-              }}
-              onOpenConnections={() => openSettings("models")}
-              onOpenBilling={() => openSettings("billing")}
-              runError={composer.displayedRunError}
-              runErrorId={composer.displayedRunErrorId}
-              onRunErrorPresented={composer.handleRunErrorPresented}
-              onDismissError={composer.dismissComposerError}
-              sending={sending}
-              fileInputRef={composer.fileInputRef}
-              onAttachmentPick={composer.onAttachmentPick}
-              onRemoveAttachment={composer.removeAttachment}
-              onSend={async (text, ...rest) => {
-                if (activeMediaModel) {
-                  try {
-                    const provider = activeMediaModel.provider as
-                      | "openai"
-                      | "xai"
-                      | "fal"
-                      | "uncensoredllm"
-                      | "refuseless"
-                      | "venice"
-                      | "higgsfield";
-                    const result = await rpc.media.generate({
-                      threadId: activeSnapshot?.threadId,
-                      provider,
-                      modelId: activeMediaModel.modelId,
-                      kind: activeMediaModel.kind === "video" ? "video_gen" : "image_gen",
-                      prompt: text,
-                    });
-                    if (result.switched) {
-                      toast.info(
-                        `Switched from ${result.originalProvider ?? provider} (${result.switchReason ?? "fallback"}) to ${result.actualProvider}`,
-                      );
-                    } else if (result.status === "queued") {
-                      toast.success(`Queued ${activeMediaModel.kind} on ${result.actualProvider}`);
-                    }
-                    await refreshActiveThread();
-                    return true;
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : "Media generation failed");
-                    return false;
+                  key={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
+                  draftKey={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
+                  enterToSend={enterToSend}
+                  sendColors={userBubble}
+                  modelPicker={
+                    active && !inGroup && (personaThread || showComposerModel) ? (
+                      <div className="flex min-w-0 items-center gap-2">
+                        {personaThread ? (
+                          <PersonaPicker
+                            selectedPersonaId={mainPersona?.id ?? "default"}
+                            onSelectPersona={(persona) =>
+                              setMainPersonas((current) => ({
+                                ...current,
+                                [personaThread]: persona,
+                              }))
+                            }
+                          />
+                        ) : null}
+                        {showComposerModel ? (
+                          <ComposerModelPicker
+                            bot={active}
+                            disabled={Boolean(recordingSkill)}
+                            activeMediaModel={activeMediaModel}
+                            onSelectMediaModel={setActiveMediaModel}
+                            onConnect={() => openSettings("models")}
+                            onSaved={(updated) =>
+                              setBots((current) =>
+                                current.map((bot) => (bot.id === updated.id ? updated : bot)),
+                              )
+                            }
+                          />
+                        ) : null}
+                      </div>
+                    ) : undefined
                   }
-                }
-                return composer.sendMessage(text, ...rest);
-              }}
-              onStop={stopRun}
-              phoneCallsEnabled={bootstrapMe?.phoneCallsEnabled === true}
-              dictationTranscribe={voiceStatus ? Boolean(voiceStatus.transcribe) : undefined}
-              artifactTarget={transcriptArtifactTarget}
-              replyTarget={composer.replyTarget}
-              replyQuote={composer.replyQuote}
-              replyTargetName={replyTargetName}
-              onClearReply={composer.clearReply}
-              mentionTargets={composerMentionTargets}
-              agentSkills={agentSkills}
-              onSlashOpen={refreshAgentSkills}
-              onSlashAction={(action) => {
-                if (action === "chat-settings") {
-                  setPanel(inGroup ? "group-settings" : "settings");
-                  return;
-                }
-                if (action === "settings-general") {
-                  openSettings("general");
-                  return;
-                }
-                if (action === "settings-usage") {
-                  openSettings("usage");
-                }
-              }}
-            />
+                  activeName={
+                    activeMediaModel
+                      ? `${activeMediaModel.kind === "image" ? "Image" : "Video"} (${activeMediaModel.displayName})`
+                      : inGroup
+                        ? (activeGroup?.name ?? activeSnapshot?.groupName)
+                        : active?.name
+                  }
+                  running={composerRunning}
+                  disabled={Boolean(recordingSkill)}
+                  pendingAttachments={composer.activePendingAttachments}
+                  attachmentNotice={composer.attachmentNotice}
+                  sendError={sendError}
+                  imageConfirmation={composer.imageConfirmation}
+                  onDraftEdited={composer.clearImageConfirmation}
+                  onOpenModels={() => {
+                    // A group's failed run belongs to one member; change that bot's model.
+                    const failedBotId =
+                      inGroup && composer.displayedRunError ? activeSnapshot?.run?.botId : null;
+                    if (active && !inGroup) {
+                      setPanel("settings");
+                      setModelFocusRequest(Date.now());
+                    } else if (failedBotId) {
+                      openChatSettings("bot", failedBotId);
+                      setModelFocusRequest(Date.now());
+                    } else openSettings("models");
+                  }}
+                  onOpenConnections={() => openSettings("models")}
+                  onOpenBilling={() => openSettings("billing")}
+                  runError={composer.displayedRunError}
+                  runErrorId={composer.displayedRunErrorId}
+                  onRunErrorPresented={composer.handleRunErrorPresented}
+                  onDismissError={composer.dismissComposerError}
+                  sending={sending}
+                  fileInputRef={composer.fileInputRef}
+                  onAttachmentPick={composer.onAttachmentPick}
+                  onRemoveAttachment={composer.removeAttachment}
+                  onSend={async (text, ...rest) => {
+                    if (activeMediaModel) {
+                      try {
+                        const provider = activeMediaModel.provider as
+                          | "openai"
+                          | "xai"
+                          | "fal"
+                          | "uncensoredllm"
+                          | "refuseless"
+                          | "venice"
+                          | "higgsfield";
+                        const result = await rpc.media.generate({
+                          threadId: activeSnapshot?.threadId,
+                          provider,
+                          modelId: activeMediaModel.modelId,
+                          kind: activeMediaModel.kind === "video" ? "video_gen" : "image_gen",
+                          prompt: text,
+                        });
+                        if (result.switched) {
+                          toast.info(
+                            `Switched from ${result.originalProvider ?? provider} (${result.switchReason ?? "fallback"}) to ${result.actualProvider}`,
+                          );
+                        } else if (result.status === "queued") {
+                          toast.success(
+                            `Queued ${activeMediaModel.kind} on ${result.actualProvider}`,
+                          );
+                        }
+                        await refreshActiveThread();
+                        return true;
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Media generation failed");
+                        return false;
+                      }
+                    }
+                    return composer.sendMessage(text, ...rest);
+                  }}
+                  onStop={stopRun}
+                  phoneCallsEnabled={bootstrapMe?.phoneCallsEnabled === true}
+                  dictationTranscribe={voiceStatus ? Boolean(voiceStatus.transcribe) : undefined}
+                  artifactTarget={transcriptArtifactTarget}
+                  replyTarget={composer.replyTarget}
+                  replyQuote={composer.replyQuote}
+                  replyTargetName={replyTargetName}
+                  onClearReply={composer.clearReply}
+                  mentionTargets={composerMentionTargets}
+                  agentSkills={agentSkills}
+                  onSlashOpen={refreshAgentSkills}
+                  onSlashAction={(action) => {
+                    if (action === "chat-settings") {
+                      setPanel(inGroup ? "group-settings" : "settings");
+                      return;
+                    }
+                    if (action === "settings-general") {
+                      openSettings("general");
+                      return;
+                    }
+                    if (action === "settings-usage") {
+                      openSettings("usage");
+                    }
+                  }}
+                />
               </div>
             ) : null}
           </div>
@@ -1684,11 +1701,7 @@ function SpaceShell() {
                 const mainBranch = projectBranches.find((b) => b.isMain);
                 if (!mainBranch) throw new Error("Could not find Main.");
                 const strategy =
-                  mode === "replace_spot"
-                    ? "replace"
-                    : mode === "drop_block"
-                      ? "append"
-                      : "insert";
+                  mode === "replace_spot" ? "replace" : mode === "drop_block" ? "append" : "insert";
                 const res = await rpc.merges.executeStrategy({
                   projectId: activeProject.id,
                   sourceBranchId,
@@ -1700,7 +1713,11 @@ function SpaceShell() {
                   previewOnly: false,
                 });
                 if (res.receipt) {
-                  setMergeReceipts([res.receipt]);
+                  const targetId = res.targetMessageId ?? null;
+                  setMergeReceipts((prev) => [
+                    { receipt: res.receipt!, targetMessageId: targetId },
+                    ...prev.filter((entry) => entry.receipt.id !== res.receipt!.id),
+                  ]);
                 }
                 await refreshActiveThread().catch(() => {
                   toast.error("The merge was saved. Could not refresh Main.");
@@ -1720,15 +1737,25 @@ function SpaceShell() {
               selectionReset={selectionReset}
               onRestoreBranch={async () => {
                 try {
-                  const restored = await rpc.branches.archive({ branchId: sideBranch.id, archived: false });
-                  setSideBranch((current) => current?.id === restored.id ? restored : current);
-                  setProjectBranches((current) => current.map((branch) => branch.id === restored.id ? restored : branch));
+                  const restored = await rpc.branches.archive({
+                    branchId: sideBranch.id,
+                    archived: false,
+                  });
+                  setSideBranch((current) => (current?.id === restored.id ? restored : current));
+                  setProjectBranches((current) =>
+                    current.map((branch) => (branch.id === restored.id ? restored : branch)),
+                  );
                 } catch (error) {
-                  toast.error(error instanceof Error ? error.message : "Could not restore the branch.");
+                  toast.error(
+                    error instanceof Error ? error.message : "Could not restore the branch.",
+                  );
                 }
               }}
               onOpenCompareArena={setCompareSource}
-              onClose={() => { setSideBranch(null); setCompareSource(undefined); }}
+              onClose={() => {
+                setSideBranch(null);
+                setCompareSource(undefined);
+              }}
             />
           ) : null}
         </div>
@@ -1750,7 +1777,19 @@ function SpaceShell() {
           standaloneMessage={standaloneCanvasMessage}
           onSavedStandalone={saveCanvasMarkdown}
           onMerged={async ({ receipt, archivedBranchId }) => {
-            if (receipt) setMergeReceipts([receipt]);
+            if (receipt) {
+              const refreshedReceipts = await rpc.merges
+                .listReceipts({ projectId: activeProject.id })
+                .catch(() => null);
+              if (refreshedReceipts) {
+                setMergeReceipts(refreshedReceipts);
+              } else {
+                setMergeReceipts((prev) => [
+                  { receipt, targetMessageId: null },
+                  ...prev.filter((entry) => entry.receipt.id !== receipt.id),
+                ]);
+              }
+            }
             setSelectionReset((current) => current + 1);
             setMergeSelection({ text: "" });
             if (archivedBranchId) {
@@ -1771,7 +1810,9 @@ function SpaceShell() {
       {compareSource && sideBranch?.id === compareSource.branchId ? (
         <CompareModelsArena
           open
-          onOpenChange={(open) => { if (!open) setCompareSource(undefined); }}
+          onOpenChange={(open) => {
+            if (!open) setCompareSource(undefined);
+          }}
           rpc={rpc}
           activeBot={active}
           threadId={sideBranch.threadId}
@@ -1791,12 +1832,37 @@ function SpaceShell() {
       ) : null}
 
       {regenerateTarget ? (
-        <RegenerateReplyDialog rpc={rpc} target={regenerateTarget} activeBot={active}
-          persona={mainPersona} onRegenerated={async () => {
+        <RegenerateReplyDialog
+          rpc={rpc}
+          target={regenerateTarget}
+          activeBot={active}
+          persona={mainPersona}
+          onRegenerated={async () => {
             await refreshActiveThread();
             toast.success("Reply regenerated");
-          }} onClose={() => setRegenerateTarget(undefined)} />
+          }}
+          onClose={() => setRegenerateTarget(undefined)}
+        />
       ) : null}
+
+      <KnowledgeBaseDialog
+        open={knowledgeOpen}
+        onOpenChange={setKnowledgeOpen}
+        rpc={rpc}
+        activeBotId={active?.id ?? bots[0]?.id ?? null}
+        onStartChatWithArtifact={async (artifact) => {
+          const cleanName = artifact.name.replace(/\.[^.]+$/, "").slice(0, 48) || "Document Chat";
+          const created = await rpc.projects.createIndependentChat({ title: cleanName });
+          await queryClient.invalidateQueries({ queryKey: queries.bots.list.queryKey() });
+          openBot(created.assistantBotId);
+          await rpc.threads.send({
+            botId: created.assistantBotId,
+            text: `Let's work with "${artifact.name}" from the Knowledge Base. Please summarize its key points first.`,
+            artifactIds: [artifact.id],
+            clientNonce: crypto.randomUUID(),
+          });
+        }}
+      />
 
       <PageViewHost />
       <CallCard onSettings={() => openSettings("voice")} />
@@ -1823,8 +1889,7 @@ function SpaceShell() {
         activeProjectId={activeProject?.id ?? null}
         activeBranchId={activeBranchId}
         isBranch={Boolean(
-          activeBranchId &&
-            projectBranches.find((b) => b.id === activeBranchId)?.parentBranchId,
+          activeBranchId && projectBranches.find((b) => b.id === activeBranchId)?.parentBranchId,
         )}
         computerOpen={computerOpen}
         computerPanel={

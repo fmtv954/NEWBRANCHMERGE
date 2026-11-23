@@ -44,17 +44,10 @@ import {
 } from "react";
 import { ActiveBotGlyph } from "../../../components/ai/CollaborationMarker";
 import { BranchSetupDialog } from "../../../components/branching/BranchSetupDialog";
-import {
-  CompareModelsCard,
-  InlineMergeReviewCard,
-  KeptItemCard,
-  MergeReceiptBanner,
-} from "../../../components/branching/InlineBranchCards";
+import { KeptItemCard } from "../../../components/branching/InlineBranchCards";
 import { VoiceChatCard } from "../../../components/call/VoiceChatCard";
-import {
-  RunContinuityCard,
-  type RunContinuityState,
-} from "../../../components/runs/RunContinuityCard";
+import type { RunContinuityState } from "../../../components/runs/RunContinuityCard";
+import { RunContinuityCard } from "../../../components/runs/RunContinuityCard";
 import {
   isDetachedRange,
   lastSelectedText,
@@ -206,7 +199,7 @@ export const Transcript = memo(function Transcript({
   placements?: readonly Placement[];
   activeMergeReview?: MergeReview | null;
   compareGroups?: readonly CompareGroup[];
-  mergeReceipts?: readonly MergeReceipt[];
+  mergeReceipts?: readonly { receipt: MergeReceipt; targetMessageId: string | null }[];
   runContinuity?: RunContinuityState | null;
   onBranchCreated?: (branchId: string) => void;
   reviewBlocksOpen?: boolean;
@@ -214,6 +207,7 @@ export const Transcript = memo(function Transcript({
     messageId: string;
     quoteText?: string;
     sourceMarkdown?: string;
+    anchor?: { startUtf16: number; endUtf16: number };
   }) => void;
   onReorderPlacements?: (orderedIds: string[]) => Promise<void>;
   onRemovePlacement?: (placementId: string) => Promise<void>;
@@ -772,23 +766,29 @@ export const Transcript = memo(function Transcript({
                       onCommitMessageMarkdown={onCommitMessageMarkdown}
                       onOpenRearrangeCanvas={onOpenRearrangeCanvas}
                       onRegenerate={onRegenerateMessage}
-                      onUndoMerge={
-                        mergeReceipts && mergeReceipts.length > 0
-                          ? async () => {
-                              const receipt = mergeReceipts[0]!;
-                              await rpc.merges.undo({
-                                mergeReceiptId: receipt.id,
-                                idempotencyKey: crypto.randomUUID(),
-                              });
-                              onDismissMergeReceipt?.(receipt.id);
-                              await onRefresh();
-                            }
-                          : undefined
-                      }
+                      onUndoMerge={(() => {
+                        const match = mergeReceipts?.find(
+                          (entry) => entry.targetMessageId === message.id,
+                        );
+                        if (!match) return undefined;
+                        return async () => {
+                          await rpc.merges.undo({
+                            mergeReceiptId: match.receipt.id,
+                            idempotencyKey: crypto.randomUUID(),
+                          });
+                          onDismissMergeReceipt?.(match.receipt.id);
+                          await onRefresh();
+                        };
+                      })()}
                       onBranchBlockText={
                         onInstantBranch
-                          ? (msg, quoteText, sourceMarkdown) =>
-                              onInstantBranch({ messageId: msg.id, quoteText, sourceMarkdown })
+                          ? (msg, quoteText, sourceMarkdown, anchor) =>
+                              onInstantBranch({
+                                messageId: msg.id,
+                                quoteText,
+                                sourceMarkdown,
+                                anchor,
+                              })
                           : undefined
                       }
                       showToolActivity={showToolActivity}
@@ -843,7 +843,11 @@ export const Transcript = memo(function Transcript({
                   }
                 }}
                 onDrop={() => {
-                  if (!onReorderPlacements || !draggedPlacementId || draggedPlacementId === placement.id) {
+                  if (
+                    !onReorderPlacements ||
+                    !draggedPlacementId ||
+                    draggedPlacementId === placement.id
+                  ) {
                     return;
                   }
                   const ids = placements.map((p) => p.id);
@@ -881,57 +885,26 @@ export const Transcript = memo(function Transcript({
                 onViewSource={(_srcBranchId, srcMessageId) => {
                   if (srcMessageId) onJumpToMessage(srcMessageId);
                 }}
-                onMove={() => undefined}
-                onToggleNextMessage={() => undefined}
+                onMove={async (id) => {
+                  const nextAnchor =
+                    placement.anchorKind === "end_of_main" ? "after_message" : "end_of_main";
+                  await rpc.placements.move({
+                    placementId: id,
+                    anchorKind: nextAnchor,
+                    sortOrder: idx,
+                  });
+                  await onRefresh();
+                }}
+                onToggleNextMessage={async (id, nextVal) => {
+                  await rpc.placements.setContextFlags({
+                    placementId: id,
+                    useInNextMessage: nextVal,
+                  });
+                  await onRefresh();
+                }}
               />
             ))}
           </div>
-        ) : null}
-        {compareGroups?.map((group) => (
-          <CompareModelsCard
-            key={group.id}
-            promptText={group.promptText}
-            branchA={{
-              branchId: group.branchAId,
-              modelLabel: "Model A",
-              costEstimate: "—",
-              previewText: "",
-            }}
-            branchB={{
-              branchId: group.branchBId,
-              modelLabel: "Model B",
-              costEstimate: "—",
-              previewText: "",
-            }}
-            onKeepResult={async (chosenBranchId, previewText) => {
-              if (!projectId || !branchId) return;
-              await rpc.placements.keepInMain({
-                projectId,
-                sourceBranchId: chosenBranchId,
-                targetBranchId: branchId,
-                excerptText: previewText,
-                label: "Compared result",
-                clientNonce: crypto.randomUUID(),
-              });
-              await onRefresh();
-            }}
-          />
-        ))}
-        {activeMergeReview ? (
-          <InlineMergeReviewCard
-            review={activeMergeReview}
-            sourceBranchName="Branch"
-            onDefer={() => undefined}
-            onApply={async (resolutions) => {
-              await rpc.merges.apply({
-                mergeReviewId: activeMergeReview.id,
-                expectedTargetHeadRevisionId: activeMergeReview.targetHeadRevisionId,
-                idempotencyKey: crypto.randomUUID(),
-                resolutions,
-              });
-              await onRefresh();
-            }}
-          />
         ) : null}
         {/* Pure Main stream: no MergeReceiptBanner line inside chat; Undo lives inline beside Branch · Regenerate · Expand · History */}
         <div className="h-24 shrink-0" aria-hidden="true" />

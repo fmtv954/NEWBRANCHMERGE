@@ -11,7 +11,8 @@ import type {
 } from "@rakazo/contracts";
 import { Button } from "@rakazo/ui-web";
 import { X } from "lucide-react";
-import { type ComponentProps, type Dispatch, type ReactNode, type SetStateAction, useEffect, useState } from "react";
+import type { ComponentProps, Dispatch, ReactNode, SetStateAction } from "react";
+import { useEffect, useState } from "react";
 import { ContextInspectorSheet } from "../../components/branching/ContextInspectorSheet";
 import { MicrodramaStudioShell } from "../../components/microdrama/MicrodramaStudioShell";
 import { PagesList } from "../../components/pages/PagesList";
@@ -84,10 +85,7 @@ export function ShellSidePanel({
   const { t } = useLingui();
   const open = Boolean(
     panel &&
-      (active ||
-        activeGroup ||
-        panel === "microdrama-studio" ||
-        panel === "context-inspector"),
+      (active || activeGroup || panel === "microdrama-studio" || panel === "context-inspector"),
   );
   const botView = panel === "routines" || panel === "pages" || panel === "settings" ? panel : null;
 
@@ -301,34 +299,49 @@ function ContextInspectorPanel({
   isBranch: boolean;
   onPromoteInstructionsToMain?: () => void;
 }) {
-  const [preview, setPreview] = useState<ContextPreview>({
-    branchId: branchId ?? "main",
-    requestedProvider: "openai",
-    requestedModelId: "gpt-5.4",
-    billingRoute: "hosted_credits",
-    estimatedInputTokens: 0,
-    contextWindow: 128_000,
-    estimatedCostMicros: "0",
-    includedMessageIds: [],
-    includedPlacementIds: [],
-    includedArtifactIds: [],
-    omittedItems: [],
-    warnings: [],
-  });
+  const [preview, setPreview] = useState<ContextPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!branchId) return;
+    if (!branchId) {
+      setPreview(null);
+      setPreviewError(null);
+      return;
+    }
     let cancelled = false;
+    setPreviewError(null);
     void rpc.branches
       .previewContext({ branchId })
       .then((res) => {
         if (!cancelled) setPreview(res);
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(err instanceof Error ? err.message : "Could not load context preview.");
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, [rpc, branchId]);
+
+  if (previewError) {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+        {previewError}
+      </div>
+    );
+  }
+  if (!preview) {
+    return (
+      <div className="p-3 text-xs text-muted-foreground">
+        {branchId
+          ? "Loading actual context & cost preview…"
+          : "Select a branch to inspect context."}
+      </div>
+    );
+  }
 
   return (
     <ContextInspectorSheet

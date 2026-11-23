@@ -12,12 +12,17 @@ import type {
   MergeSourceBlock,
   Placement,
   Project,
-  RunManifest,
   ReplyGenerationSelection,
+  RunManifest,
   SelectionBlockRange,
   ThinkingLevel,
 } from "@rakazo/contracts";
-import { findCatalogModel, MergePreviewBaseSchema, ReplyGenerationSelectionSchema, SelectionBlockRangeSchema } from "@rakazo/contracts";
+import {
+  findCatalogModel,
+  MergePreviewBaseSchema,
+  ReplyGenerationSelectionSchema,
+  SelectionBlockRangeSchema,
+} from "@rakazo/contracts";
 import type { ItemMergeBaseline, MergeableEntity } from "@rakazo/core";
 import {
   applySurgicalSelectionPatch,
@@ -41,6 +46,7 @@ const StoredStrategyMergeSchema = z.object({
   afterContext: z.string().optional(),
   previewBase: MergePreviewBaseSchema,
   archivedBranchId: z.string().nullable(),
+  intentDigest: z.string().optional(),
 });
 const MergeMessageBlocksSchema = z.array(z.looseObject({ kind: z.string() }));
 
@@ -229,7 +235,7 @@ async function resolveDefaultAssistantBotId(
   return bot.id;
 }
 
-async function requireProjectAccess(
+export async function requireProjectAccess(
   prisma: PrismaClient,
   actor: Actor,
   projectId: string,
@@ -252,8 +258,16 @@ async function requireProjectAccess(
 }
 
 export function createProjectsService(prisma: PrismaClient, completeReply?: ProjectCompletion) {
+  const inFlightRegenerations = new Map<
+    string,
+    Promise<{ id: string; role: "assistant"; text: string; modelLabel: string; createdAt: string }>
+  >();
+
   async function branchReply(actor: Actor, input: { branchId: string; messageId: string }) {
-    const branch = await prisma.branch.findUnique({ where: { id: input.branchId }, include: { forkOrigin: true } });
+    const branch = await prisma.branch.findUnique({
+      where: { id: input.branchId },
+      include: { forkOrigin: true },
+    });
     if (!branch) throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
     const project = await requireProjectAccess(prisma, actor, branch.projectId, "editor");
     const message = await prisma.message.findFirst({
@@ -388,7 +402,10 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       input: { title?: string; isTemporary?: boolean; assistantBotId?: string },
     ): Promise<{ threadId: string; assistantBotId: string }> {
       const chatTitle =
-        input.title?.trim() || (input.isTemporary ? "Temporary Chat" : `Chat ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+        input.title?.trim() ||
+        (input.isTemporary
+          ? "Temporary Chat"
+          : `Chat ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
 
       // Copy space default model preference from any existing active bot so New Chat works immediately.
       const templateBot = await prisma.bot.findFirst({
@@ -515,7 +532,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         throw new ORPCError("NOT_FOUND", { message: "Chat thread not found" });
       }
 
-      let targetProjectId = input.targetProjectId;
+      const targetProjectId = input.targetProjectId;
       if (targetProjectId) {
         await requireProjectAccess(prisma, actor, targetProjectId, "editor");
       }
@@ -580,8 +597,20 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       },
     ): Promise<{ revisionId: string; messageId: string; updatedMarkdown: string }> {
       await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const branch = await prisma.branch.findFirst({
+        where: { id: input.branchId, projectId: input.projectId },
+        select: { id: true, threadId: true, archivedAt: true },
+      });
+      if (!branch) {
+        throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
+      }
+      if (branch.archivedAt) {
+        throw new ORPCError("CONFLICT", {
+          message: "Restore this branch before editing its replies.",
+        });
+      }
       const message = await prisma.message.findFirst({
-        where: { id: input.messageId, thread: { spaceId: actor.spaceId } },
+        where: { id: input.messageId, threadId: branch.threadId },
         select: { id: true, blocks: true, activeRevisionId: true },
       });
       if (!message) {
@@ -661,8 +690,20 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       updatedMarkdown: string;
     }> {
       await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const branch = await prisma.branch.findFirst({
+        where: { id: input.branchId, projectId: input.projectId },
+        select: { id: true, threadId: true, archivedAt: true },
+      });
+      if (!branch) {
+        throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
+      }
+      if (branch.archivedAt) {
+        throw new ORPCError("CONFLICT", {
+          message: "Restore this branch before editing its replies.",
+        });
+      }
       const message = await prisma.message.findFirst({
-        where: { id: input.messageId, thread: { spaceId: actor.spaceId } },
+        where: { id: input.messageId, threadId: branch.threadId },
         select: { id: true, blocks: true, activeRevisionId: true },
       });
       if (!message) {
@@ -750,13 +791,26 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
     async listMessageRevisions(actor: Actor, messageId: string) {
       const message = await prisma.message.findFirst({
         where: { id: messageId, thread: { spaceId: actor.spaceId } },
-        select: { id: true, activeRevisionId: true },
+        select: { id: true, threadId: true, activeRevisionId: true },
       });
       if (!message) throw new ORPCError("NOT_FOUND", { message: "Message not found" });
+      const ownerBranch = await prisma.branch.findFirst({
+        where: { threadId: message.threadId },
+        select: { projectId: true },
+      });
+      if (ownerBranch) {
+        await requireProjectAccess(prisma, actor, ownerBranch.projectId, "viewer");
+      }
       const rows = await prisma.messageRevision.findMany({
         where: { messageId: message.id },
         orderBy: { version: "desc" },
-        select: { id: true, version: true, canonicalText: true, sourceAction: true, createdAt: true },
+        select: {
+          id: true,
+          version: true,
+          canonicalText: true,
+          sourceAction: true,
+          createdAt: true,
+        },
       });
       return {
         messageId: message.id,
@@ -777,7 +831,9 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
     ) {
       const { branch } = await branchReply(actor, input);
       if (branch.projectId !== input.projectId || branch.archivedAt) {
-        throw new ORPCError("CONFLICT", { message: "Restore this branch before editing its replies." });
+        throw new ORPCError("CONFLICT", {
+          message: "Restore this branch before editing its replies.",
+        });
       }
       const rev = await prisma.messageRevision.findFirst({
         where: { id: input.revisionId, messageId: input.messageId },
@@ -959,11 +1015,71 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       const model =
         findCatalogModel(provider, modelId) ?? findCatalogModel("openai", "gpt-6.2-sol")!;
 
-      const messages = await prisma.message.findMany({
+      const contextMode =
+        (branch.forkOrigin?.contextMode as "through_message" | "only_selection" | "custom") ??
+        "through_message";
+
+      let inheritedMessages: Array<{ id: string; seq: number; role: string; text: string }> = [];
+      if (contextMode === "through_message" && !branch.isMain && branch.forkOrigin) {
+        const parent = await prisma.branch.findUnique({
+          where: { id: branch.forkOrigin.sourceBranchId },
+          select: { threadId: true },
+        });
+        if (parent) {
+          const parentRows = await prisma.message.findMany({
+            where: {
+              threadId: parent.threadId,
+              role: { in: ["user", "assistant", "bot"] },
+              ...(branch.forkOrigin.inheritedUpToSeq > 0
+                ? { seq: { lte: branch.forkOrigin.inheritedUpToSeq } }
+                : {}),
+            },
+            orderBy: { seq: "desc" },
+            take: 16,
+            select: {
+              id: true,
+              seq: true,
+              role: true,
+              blocks: true,
+              revisions: {
+                orderBy: { version: "asc" },
+                select: { version: true, canonicalText: true, sourceAction: true, createdAt: true },
+              },
+            },
+          });
+          const forkAt = branch.forkOrigin.createdAt;
+          inheritedMessages = parentRows.reverse().map((m) => {
+            let text = extractTextFromBlocks(m.blocks);
+            if (forkAt && m.revisions.length > 0) {
+              const beforeFork = m.revisions.filter((rev) => rev.createdAt <= forkAt);
+              if (beforeFork.length > 0) text = beforeFork.at(-1)!.canonicalText;
+              else {
+                const original = m.revisions.find(
+                  (rev) => rev.version === 1 || rev.sourceAction === "original",
+                );
+                if (original) text = original.canonicalText;
+              }
+            }
+            return { id: m.id, seq: m.seq, role: m.role, text };
+          });
+        }
+      }
+
+      const branchMessages = await prisma.message.findMany({
         where: { threadId: branch.threadId },
         orderBy: { seq: "asc" },
         select: { id: true, seq: true, role: true, blocks: true },
       });
+
+      const allTurns = [
+        ...inheritedMessages,
+        ...branchMessages.map((m) => ({
+          id: m.id,
+          seq: m.seq,
+          role: m.role,
+          text: extractTextFromBlocks(m.blocks),
+        })),
+      ];
 
       const placements = await prisma.placement.findMany({
         where: {
@@ -981,25 +1097,20 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         branchId: branch.id,
         model,
         billingRoute: "byok",
-        contextMode:
-          (branch.forkOrigin?.contextMode as "through_message" | "only_selection" | "custom") ??
-          "through_message",
+        contextMode,
         inheritedUpToSeq: branch.forkOrigin?.inheritedUpToSeq ?? null,
         selectedExcerptText:
           (branch.forkOrigin?.selectionRangeJson as SelectionBlockRange | null)?.quoteText ?? null,
-        turns: messages.map((m) => {
-          const text = JSON.stringify(m.blocks);
-          return {
-            id: m.id,
-            seq: m.seq,
-            role: (m.role === "user" ? "user" : m.role === "system" ? "system" : "bot") as
-              | "user"
-              | "bot"
-              | "system",
-            text,
-            estimatedTokens: Math.max(1, Math.ceil(text.length / 4)),
-          };
-        }),
+        turns: allTurns.map((m) => ({
+          id: m.id,
+          seq: m.seq,
+          role: (m.role === "user" ? "user" : m.role === "system" ? "system" : "bot") as
+            | "user"
+            | "bot"
+            | "system",
+          text: m.text,
+          estimatedTokens: Math.max(1, Math.ceil(m.text.length / 4)),
+        })),
         attachments: placements.map((p) => ({
           id: p.id,
           label: p.label,
@@ -1156,6 +1267,46 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       },
     ): Promise<Placement> {
       await requireProjectAccess(prisma, actor, input.projectId, "editor");
+      const [sourceBranch, targetBranch] = await Promise.all([
+        prisma.branch.findFirst({
+          where: { id: input.sourceBranchId, projectId: input.projectId },
+          select: { id: true, threadId: true },
+        }),
+        prisma.branch.findFirst({
+          where: { id: input.targetBranchId, projectId: input.projectId },
+          select: { id: true, threadId: true },
+        }),
+      ]);
+      if (!sourceBranch || !targetBranch) {
+        throw new ORPCError("NOT_FOUND", {
+          message: "Source or target branch not found in project",
+        });
+      }
+      let originCreatedAt = new Date();
+      let originRunId: string | null = null;
+      if (input.sourceMessageId) {
+        const sourceMsg = await prisma.message.findFirst({
+          where: { id: input.sourceMessageId, threadId: sourceBranch.threadId },
+          select: { id: true, createdAt: true, runId: true },
+        });
+        if (!sourceMsg) {
+          throw new ORPCError("NOT_FOUND", {
+            message: "Source message does not belong to the source branch",
+          });
+        }
+        originCreatedAt = sourceMsg.createdAt;
+        originRunId = sourceMsg.runId;
+      }
+      if (input.artifactId) {
+        const artifact = await prisma.artifact.findFirst({
+          where: { id: input.artifactId, spaceId: actor.spaceId },
+          select: { id: true, createdAt: true },
+        });
+        if (!artifact) {
+          throw new ORPCError("NOT_FOUND", { message: "Artifact not found in space" });
+        }
+        if (!input.sourceMessageId) originCreatedAt = artifact.createdAt;
+      }
       const existing = await prisma.placement.findUnique({
         where: {
           targetBranchId_clientNonce: {
@@ -1189,7 +1340,8 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
           useInNextMessage: input.useInNextMessage,
           pinnedAsContext: input.pinnedAsContext,
           clientNonce: input.clientNonce,
-          originCreatedAt: new Date(),
+          originRunId,
+          originCreatedAt,
         },
       });
       return mapPlacement(created);
@@ -1675,6 +1827,17 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       });
       if (!original) throw new ORPCError("NOT_FOUND", { message: "Merge receipt not found" });
       await requireProjectAccess(prisma, actor, original.projectId, "editor");
+      if (original.undoneByReceiptId) {
+        throw new ORPCError("CONFLICT", { message: "This merge has already been undone." });
+      }
+
+      const originalAfterRev = await prisma.projectRevision.findUnique({
+        where: { id: original.targetAfterRevisionId },
+        select: { stateDeltaJson: true },
+      });
+      const strategyDelta = StoredStrategyMergeSchema.safeParse(
+        originalAfterRev?.stateDeltaJson,
+      ).data;
 
       const appliedItems = Array.isArray(original.itemResolutionsJson)
         ? (original.itemResolutionsJson as Parameters<typeof computeUndoMerge>[0]["appliedItems"])
@@ -1696,6 +1859,63 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       if (!targetBranch) throw new ORPCError("NOT_FOUND", { message: "Target branch not found" });
 
       const undoReceipt = await prisma.$transaction(async (tx) => {
+        if (strategyDelta) {
+          const targetMsg = await tx.message.findFirst({
+            where: {
+              id: strategyDelta.previewBase.messageId,
+              threadId: targetBranch.threadId,
+            },
+            select: { id: true, blocks: true, activeRevisionId: true },
+          });
+          if (!targetMsg) {
+            throw new ORPCError("CONFLICT", {
+              message: "The merged Main message could not be found.",
+            });
+          }
+          const blocks = MergeMessageBlocksSchema.safeParse(targetMsg.blocks).data;
+          const blockIdx = strategyDelta.previewBase.blockIndex;
+          const currentBlock = blocks?.[blockIdx];
+          const currentText =
+            currentBlock?.kind === "text" && typeof currentBlock.text === "string"
+              ? currentBlock.text
+              : null;
+          if (!blocks || currentText === null || currentText !== strategyDelta.afterText) {
+            throw new ORPCError("CONFLICT", {
+              message:
+                "Main was edited after this merge. Use History (vN) to restore an earlier version safely.",
+            });
+          }
+          const restoredBlocks = [...blocks];
+          restoredBlocks[blockIdx] = {
+            ...restoredBlocks[blockIdx],
+            kind: "text",
+            text: strategyDelta.beforeText,
+          };
+          const latestMsgRev = await tx.messageRevision.findFirst({
+            where: { messageId: targetMsg.id },
+            orderBy: { version: "desc" },
+            select: { version: true },
+          });
+          const undoMsgRev = await tx.messageRevision.create({
+            data: {
+              messageId: targetMsg.id,
+              version: (latestMsgRev?.version ?? 0) + 1,
+              canonicalText: strategyDelta.beforeText,
+              blocksJson: restoredBlocks as object,
+              sourceAction: "merge_undo",
+            },
+          });
+          const updated = await tx.message.updateMany({
+            where: { id: targetMsg.id, activeRevisionId: targetMsg.activeRevisionId },
+            data: { blocks: restoredBlocks as object, activeRevisionId: undoMsgRev.id },
+          });
+          if (!updated.count) {
+            throw new ORPCError("CONFLICT", {
+              message: "Main changed while undoing this merge. Try again.",
+            });
+          }
+        }
+
         const latestRev = await tx.projectRevision.findFirst({
           where: { branchId: targetBranch.id },
           orderBy: { revisionNumber: "desc" },
@@ -1713,6 +1933,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
             eventType: "merge_undo",
             stateDeltaJson: {
               undidReceiptId: original.id,
+              targetMessageId: strategyDelta?.previewBase.messageId ?? null,
               autoRestorable: undoPlan.autoRestorable,
               interveningConflicts: undoPlan.interveningConflicts,
             },
@@ -1835,23 +2056,11 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         (branch.forkOrigin?.selectionRangeJson as SelectionBlockRange | null)?.quoteText ||
         "";
 
-      // Persist user message strictly on the side branch's isolated threadId (never Main).
-      const latestSide = await prisma.message.findFirst({
-        where: { threadId: branch.threadId },
-        orderBy: { seq: "desc" },
-        select: { seq: true },
-      });
-      const userSeq = (latestSide?.seq ?? 0) + 1;
-      const userRow = await prisma.message.create({
-        data: {
-          threadId: branch.threadId,
-          seq: userSeq,
-          role: "user",
-          authorUserId: actor.userId,
-          blocks: [{ kind: "text", text: promptText }],
-        },
-        select: { id: true, createdAt: true },
-      });
+      if (!completeReply) {
+        throw new ORPCError("SERVICE_UNAVAILABLE", {
+          message: "Model completion runtime is unavailable.",
+        });
+      }
 
       // Assemble LLM context based on persona, responseStyle, and delimited read-only Main context.
       const responseStyle = input.responseStyle ?? "direct";
@@ -1877,10 +2086,7 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
                   "Response style: DEEP. Format like a frontier research brief: clear section headings (## / ###), **bold lead-ins** on key points, short scannable paragraphs, horizontal rules (---) between major sections, tables where comparing options, and clickable Markdown [Source](https://...) citations. Never repeat content already in Main.",
               };
 
-      const llmMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
-      const personaPrefix = input.personaPrompt?.trim()
-        ? `${input.personaPrompt.trim()}\n\n`
-        : "";
+      const personaPrefix = input.personaPrompt?.trim() ? `${input.personaPrompt.trim()}\n\n` : "";
       const antiRepeatRules = [
         "You are answering a focused 1-on-1 side-branch question.",
         focusQuote
@@ -1895,84 +2101,97 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         .filter(Boolean)
         .join("\n");
 
-      llmMessages.push({
-        role: "system",
-        content: `${personaPrefix}${antiRepeatRules}`,
-      });
+      const inheritedRef =
+        input.contextMode === "through_message" && branch.forkOrigin
+          ? await branchReferenceContext(prisma, branch.forkOrigin)
+          : "";
+      const instructions = [
+        `${personaPrefix}${antiRepeatRules}`,
+        inheritedRef
+          ? `<main_context_reference_only>\nDo NOT repeat or rewrite this background text. Use it only to understand what the user is referring to.\n\n${inheritedRef}\n</main_context_reference_only>`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
 
-      // Wrap inherited Main history in a single clearly delimited read-only reference block
-      // so the model resolves pronouns without mimicking Main's essay structure.
-      if (input.contextMode === "through_message" && branch.forkOrigin?.sourceBranchId) {
-        const parentBranch = await prisma.branch.findUnique({
-          where: { id: branch.forkOrigin.sourceBranchId },
-          select: { threadId: true },
-        });
-        if (parentBranch) {
-          const parentMsgs = await prisma.message.findMany({
-            where: {
-              threadId: parentBranch.threadId,
-              ...(branch.forkOrigin.inheritedUpToSeq > 0
-                ? { seq: { lte: branch.forkOrigin.inheritedUpToSeq } }
-                : {}),
-            },
-            orderBy: { seq: "asc" },
-            take: 16,
-            select: { role: true, blocks: true },
-          });
-          const refLines: string[] = [];
-          for (const pm of parentMsgs) {
-            if (pm.role !== "user" && pm.role !== "assistant" && pm.role !== "bot") continue;
-            const txt = extractTextFromBlocks(pm.blocks);
-            if (txt) {
-              const trimmed = txt.length > 1600 ? `${txt.slice(0, 1600)}…` : txt;
-              const roleLabel = pm.role === "user" ? "USER" : "ASSISTANT";
-              refLines.push(`[${roleLabel}]: ${trimmed}`);
-            }
-          }
-          if (refLines.length > 0) {
-            llmMessages.push({
-              role: "system",
-              content: `<main_context_reference_only>\nDo NOT repeat or rewrite this background text. Use it only to understand what the user is referring to.\n\n${refLines.join("\n\n")}\n</main_context_reference_only>`,
-            });
-          }
-        }
-      }
-
-      // Append prior side-branch turns (excluding the just-inserted user message, added at end).
       const priorSideMsgs = await prisma.message.findMany({
-        where: { threadId: branch.threadId, seq: { lt: userSeq } },
+        where: { threadId: branch.threadId },
         orderBy: { seq: "desc" },
         take: 30,
         select: { role: true, blocks: true },
       });
+      const history: Array<{ role: "user" | "assistant"; content: string }> = [];
       for (const sm of priorSideMsgs.reverse()) {
         if (sm.role !== "user" && sm.role !== "assistant" && sm.role !== "bot") continue;
         const txt = extractTextFromBlocks(sm.blocks);
-        if (txt) llmMessages.push({ role: sm.role === "user" ? "user" : "assistant", content: txt });
+        if (txt) history.push({ role: sm.role === "user" ? "user" : "assistant", content: txt });
       }
-      llmMessages.push({ role: "user", content: promptText });
 
-      const completion = await callBranchCompletion({
-        provider: input.provider,
-        modelId: input.modelId,
-        messages: llmMessages,
-        temperature: input.temperature ?? styleDefaults.temperature,
-        maxTokens: input.maxTokens ?? styleDefaults.maxTokens,
-      });
-
-      const assistantRow = await prisma.message.create({
-        data: {
-          threadId: branch.threadId,
-          seq: userSeq + 1,
-          role: "assistant",
-          blocks: [{ kind: "text", text: completion.text, modelLabel: completion.modelLabel, generation: {
-            provider: input.provider, modelId: input.modelId, personaId: input.personaId ?? null,
-            personaPrompt: input.personaPrompt ?? null, contextMode: input.contextMode,
-            responseStyle: input.responseStyle ?? "direct", temperature: input.temperature ?? null,
-            maxTokens: input.maxTokens ?? null,
-          } }],
+      // Execute completion BEFORE persisting so provider/auth errors never save error strings as turns.
+      const completion = await completeReply(
+        actor,
+        {
+          provider: input.provider,
+          modelId: input.modelId,
+          personaId: input.personaId,
+          personaPrompt: input.personaPrompt,
+          contextMode: input.contextMode,
+          responseStyle: input.responseStyle,
+          temperature: input.temperature ?? styleDefaults.temperature,
+          maxTokens: input.maxTokens ?? styleDefaults.maxTokens,
         },
-        select: { id: true, createdAt: true },
+        {
+          botId: undefined,
+          instructions,
+          prompt: promptText,
+          history,
+        },
+      );
+
+      // Persist both user + assistant messages atomically on the isolated side branch thread.
+      const { userRow, assistantRow } = await prisma.$transaction(async (tx) => {
+        const latestSide = await tx.message.findFirst({
+          where: { threadId: branch.threadId },
+          orderBy: { seq: "desc" },
+          select: { seq: true },
+        });
+        const userSeq = (latestSide?.seq ?? 0) + 1;
+        const createdUser = await tx.message.create({
+          data: {
+            threadId: branch.threadId,
+            seq: userSeq,
+            role: "user",
+            authorUserId: actor.userId,
+            blocks: [{ kind: "text", text: promptText }],
+          },
+          select: { id: true, createdAt: true },
+        });
+        const createdAssistant = await tx.message.create({
+          data: {
+            threadId: branch.threadId,
+            seq: userSeq + 1,
+            role: "assistant",
+            blocks: [
+              {
+                kind: "text",
+                text: completion.text,
+                modelLabel: completion.modelLabel,
+                generation: {
+                  provider: input.provider,
+                  modelId: input.modelId,
+                  personaId: input.personaId ?? null,
+                  personaPrompt: input.personaPrompt ?? null,
+                  contextMode: input.contextMode,
+                  responseStyle: input.responseStyle ?? "direct",
+                  temperature: input.temperature ?? null,
+                  maxTokens: input.maxTokens ?? null,
+                },
+              },
+            ],
+          },
+          select: { id: true, createdAt: true },
+        });
+        return { userRow: createdUser, assistantRow: createdAssistant };
       });
 
       return {
@@ -1997,7 +2216,9 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       const blocks = MergeMessageBlocksSchema.safeParse(message.blocks).data;
       const metadata = blocks?.find(({ kind }) => kind === "text")?.generation;
       const saved = ReplyGenerationSelectionSchema.safeParse(
-        metadata && typeof metadata === "object" ? Object.fromEntries(Object.entries(metadata).filter(([, value]) => value != null)) : metadata,
+        metadata && typeof metadata === "object"
+          ? Object.fromEntries(Object.entries(metadata).filter(([, value]) => value != null))
+          : metadata,
       );
       if (saved.success) return saved.data;
       if (!message.runId) return null;
@@ -2006,17 +2227,27 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
         select: { modelProvider: true, modelId: true, thinkingLevel: true },
       });
       const result = ReplyGenerationSelectionSchema.safeParse({
-        provider: run?.modelProvider, modelId: run?.modelId, thinkingLevel: run?.thinkingLevel ?? undefined,
+        provider: run?.modelProvider,
+        modelId: run?.modelId,
+        thinkingLevel: run?.thinkingLevel ?? undefined,
       });
       return result.data ?? null;
     },
 
-    async regenerate(actor: Actor, input: {
-      branchId: string; messageId: string; settings: ReplyGenerationSelection; idempotencyKey: string;
-    }) {
-      if (!completeReply) throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Regeneration is unavailable." });
+    async regenerate(
+      actor: Actor,
+      input: {
+        branchId: string;
+        messageId: string;
+        settings: ReplyGenerationSelection;
+        idempotencyKey: string;
+      },
+    ) {
+      if (!completeReply)
+        throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Regeneration is unavailable." });
       const { branch, message, project } = await branchReply(actor, input);
-      if (branch.archivedAt) throw new ORPCError("CONFLICT", { message: "Restore this branch before regenerating." });
+      if (branch.archivedAt)
+        throw new ORPCError("CONFLICT", { message: "Restore this branch before regenerating." });
       const revisionId = `regen_${sha256Hex(JSON.stringify([actor.userId, message.id, input.idempotencyKey]))}`;
       const result = (text: string, modelLabel: string) => ({
         id: message.id,
@@ -2029,82 +2260,149 @@ export function createProjectsService(prisma: PrismaClient, completeReply?: Proj
       if (existing) {
         const saved = MergeMessageBlocksSchema.safeParse(existing.blocksJson).data;
         const label = saved?.find(({ kind }) => kind === "text")?.modelLabel;
-        return result(existing.canonicalText, typeof label === "string" ? label : input.settings.modelId);
+        return result(
+          existing.canonicalText,
+          typeof label === "string" ? label : input.settings.modelId,
+        );
       }
+      const pending = inFlightRegenerations.get(revisionId);
+      if (pending) return pending;
 
-      const blocks = MergeMessageBlocksSchema.safeParse(message.blocks).data;
-      const firstText = blocks?.findIndex(({ kind }) => kind === "text") ?? -1;
-      if (!blocks || firstText < 0) throw new ORPCError("BAD_REQUEST", { message: "This reply has no text to regenerate." });
-      const run = message.runId ? await prisma.run.findFirst({
-        where: { id: message.runId, threadId: branch.threadId, spaceId: actor.spaceId },
-        select: { sourceMessageId: true },
-      }) : null;
-      const promptRow = await prisma.message.findFirst({
-        where: {
-          threadId: branch.threadId,
-          role: "user",
-          seq: { lt: message.seq },
-          ...(run?.sourceMessageId ? { id: run.sourceMessageId } : {}),
-        },
-        orderBy: { seq: "desc" },
-        select: { blocks: true, seq: true },
-      });
-      const prompt = extractTextFromBlocks(promptRow?.blocks);
-      if (!promptRow || !prompt.trim()) throw new ORPCError("CONFLICT", { message: "The original text prompt is unavailable." });
+      const work = (async () => {
+        const blocks = MergeMessageBlocksSchema.safeParse(message.blocks).data;
+        const firstText = blocks?.findIndex(({ kind }) => kind === "text") ?? -1;
+        if (!blocks || firstText < 0)
+          throw new ORPCError("BAD_REQUEST", { message: "This reply has no text to regenerate." });
+        const run = message.runId
+          ? await prisma.run.findFirst({
+              where: { id: message.runId, threadId: branch.threadId, spaceId: actor.spaceId },
+              select: { sourceMessageId: true },
+            })
+          : null;
+        const promptRow = await prisma.message.findFirst({
+          where: {
+            threadId: branch.threadId,
+            role: "user",
+            seq: { lt: message.seq },
+            ...(run?.sourceMessageId ? { id: run.sourceMessageId } : {}),
+          },
+          orderBy: { seq: "desc" },
+          select: { blocks: true, seq: true },
+        });
+        const prompt = extractTextFromBlocks(promptRow?.blocks);
+        if (!promptRow || !prompt.trim())
+          throw new ORPCError("CONFLICT", { message: "The original text prompt is unavailable." });
 
-      const rows = await prisma.message.findMany({
-        where: { threadId: branch.threadId, seq: { lt: promptRow.seq }, role: { in: ["user", "assistant", "bot"] } },
-        orderBy: { seq: "desc" }, take: 30, select: { role: true, blocks: true },
-      });
-      const focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data?.quoteText;
-      const mode = input.settings.contextMode ?? branch.forkOrigin?.contextMode;
-      const inherited = mode === "through_message" && !branch.isMain && branch.forkOrigin
-        ? await branchReferenceContext(prisma, branch.forkOrigin) : undefined;
-      const replacement = await completeReply(actor, input.settings, {
-        botId: message.botId ?? project.defaultBotId,
-        instructions: [
-          project.instructions,
-          focus ? `Branch focus: ${focus}` : "",
-          inherited ? `Read-only Main context:
-${inherited}` : "",
-          "Answer the original prompt in full.",
-        ].filter(Boolean).join("\n\n"),
-        prompt,
-        history: rows.reverse().flatMap((row) => {
-          const content = extractTextFromBlocks(row.blocks);
-          return content && (row.role === "user" || row.role === "assistant" || row.role === "bot")
-            ? [{ role: (row.role === "user" ? "user" : "assistant") as "user" | "assistant", content }]
+        const rows = await prisma.message.findMany({
+          where: {
+            threadId: branch.threadId,
+            seq: { lt: promptRow.seq },
+            role: { in: ["user", "assistant", "bot"] },
+          },
+          orderBy: { seq: "desc" },
+          take: 30,
+          select: { role: true, blocks: true },
+        });
+        const focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson)
+          .data?.quoteText;
+        const mode = input.settings.contextMode ?? branch.forkOrigin?.contextMode;
+        const inherited =
+          mode === "through_message" && !branch.isMain && branch.forkOrigin
+            ? await branchReferenceContext(prisma, branch.forkOrigin)
+            : undefined;
+        const replacement = await completeReply(actor, input.settings, {
+          botId: message.botId ?? project.defaultBotId,
+          instructions: [
+            project.instructions,
+            focus ? `Branch focus: ${focus}` : "",
+            inherited
+              ? `Read-only Main context:
+${inherited}`
+              : "",
+            "Answer the original prompt in full.",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          prompt,
+          history: rows.reverse().flatMap((row) => {
+            const content = extractTextFromBlocks(row.blocks);
+            return content &&
+              (row.role === "user" || row.role === "assistant" || row.role === "bot")
+              ? [
+                  {
+                    role: (row.role === "user" ? "user" : "assistant") as "user" | "assistant",
+                    content,
+                  },
+                ]
+              : [];
+          }),
+        });
+        const nextBlocks = blocks.flatMap((block, index) => {
+          if (block.kind !== "text") return [block];
+          return index === firstText
+            ? [
+                {
+                  ...block,
+                  text: replacement.text,
+                  modelLabel: replacement.modelLabel,
+                  generation: input.settings,
+                },
+              ]
             : [];
-        }),
-      });
-      const nextBlocks = blocks.flatMap((block, index) => {
-        if (block.kind !== "text") return [block];
-        return index === firstText ? [{
-          ...block, text: replacement.text, modelLabel: replacement.modelLabel, generation: input.settings,
-        }] : [];
-      });
-      await prisma.$transaction(async (tx) => {
-        const changed = await tx.message.updateMany({
-          where: { id: message.id, threadId: branch.threadId, activeRevisionId: message.activeRevisionId },
-          data: { blocks: nextBlocks as object },
         });
-        if (!changed.count) throw new ORPCError("CONFLICT", { message: "The reply changed while regenerating. Open it again." });
-        const latest = await tx.messageRevision.findFirst({
-          where: { messageId: message.id }, orderBy: { version: "desc" }, select: { version: true },
+        await prisma.$transaction(async (tx) => {
+          const changed = await tx.message.updateMany({
+            where: {
+              id: message.id,
+              threadId: branch.threadId,
+              activeRevisionId: message.activeRevisionId,
+            },
+            data: { blocks: nextBlocks as object },
+          });
+          if (!changed.count)
+            throw new ORPCError("CONFLICT", {
+              message: "The reply changed while regenerating. Open it again.",
+            });
+          const latest = await tx.messageRevision.findFirst({
+            where: { messageId: message.id },
+            orderBy: { version: "desc" },
+            select: { version: true },
+          });
+          if (!latest) {
+            await tx.messageRevision.create({
+              data: {
+                messageId: message.id,
+                version: 1,
+                canonicalText: extractTextFromBlocks(blocks),
+                blocksJson: blocks as object,
+                sourceAction: "original",
+              },
+            });
+          }
+          await tx.messageRevision.create({
+            data: {
+              id: revisionId,
+              messageId: message.id,
+              version: latest ? latest.version + 1 : 2,
+              canonicalText: replacement.text,
+              blocksJson: nextBlocks as object,
+              sourceAction: "regenerate",
+            },
+          });
+          await tx.message.update({
+            where: { id: message.id },
+            data: { activeRevisionId: revisionId },
+          });
         });
-        if (!latest) {
-          await tx.messageRevision.create({ data: {
-            messageId: message.id, version: 1, canonicalText: extractTextFromBlocks(blocks),
-            blocksJson: blocks as object, sourceAction: "original",
-          } });
-        }
-        await tx.messageRevision.create({ data: {
-          id: revisionId, messageId: message.id, version: latest ? latest.version + 1 : 2,
-          canonicalText: replacement.text, blocksJson: nextBlocks as object, sourceAction: "regenerate",
-        } });
-        await tx.message.update({ where: { id: message.id }, data: { activeRevisionId: revisionId } });
-      });
-      return result(replacement.text, replacement.modelLabel);
+        return result(replacement.text, replacement.modelLabel);
+      })();
+
+      inFlightRegenerations.set(revisionId, work);
+      try {
+        return await work;
+      } finally {
+        inFlightRegenerations.delete(revisionId);
+      }
     },
 
     async renameBranch(actor: Actor, input: { branchId: string; name: string }): Promise<Branch> {
@@ -2142,7 +2440,10 @@ ${inherited}` : "",
       input: {
         prompt: string;
         personaPrompt?: string;
-        source?: Pick<ReplyGenerationSelection, "contextMode" | "responseStyle" | "temperature" | "maxTokens"> & {
+        source?: Pick<
+          ReplyGenerationSelection,
+          "contextMode" | "responseStyle" | "temperature" | "maxTokens"
+        > & {
           branchId: string;
           blocks: MergeSourceBlock[];
         };
@@ -2155,126 +2456,205 @@ ${inherited}` : "",
       let botId: string | null | undefined;
       let history: Parameters<ProjectCompletion>[2]["history"] = [];
       if (source) {
-        const branch = await prisma.branch.findUnique({ where: { id: source.branchId }, include: { forkOrigin: true } });
+        const branch = await prisma.branch.findUnique({
+          where: { id: source.branchId },
+          include: { forkOrigin: true },
+        });
         if (!branch) throw new ORPCError("NOT_FOUND", { message: "Branch not found" });
         const project = await requireProjectAccess(prisma, actor, branch.projectId, "editor");
         botId = project.defaultBotId;
         const ids = [...new Set(source.blocks.map(({ messageId }) => messageId))];
         if (ids.length) {
           const found = await prisma.message.count({
-            where: { id: { in: ids }, threadId: branch.threadId, role: { in: ["assistant", "bot"] } },
+            where: {
+              id: { in: ids },
+              threadId: branch.threadId,
+              role: { in: ["assistant", "bot"] },
+            },
           });
-          if (found !== ids.length) throw new ORPCError("BAD_REQUEST", { message: "A selected reply is no longer in this branch." });
+          if (found !== ids.length)
+            throw new ORPCError("BAD_REQUEST", {
+              message: "A selected reply is no longer in this branch.",
+            });
         }
-        focus = SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data?.quoteText ?? "";
+        focus =
+          SelectionBlockRangeSchema.safeParse(branch.forkOrigin?.selectionRangeJson).data
+            ?.quoteText ?? "";
         if (source.contextMode === "through_message") {
-          if (branch.forkOrigin) inherited = await branchReferenceContext(prisma, branch.forkOrigin);
+          if (branch.forkOrigin)
+            inherited = await branchReferenceContext(prisma, branch.forkOrigin);
           const rows = await prisma.message.findMany({
             where: { threadId: branch.threadId, role: { in: ["user", "assistant", "bot"] } },
-            orderBy: { seq: "desc" }, take: 12, select: { role: true, blocks: true },
+            orderBy: { seq: "desc" },
+            take: 12,
+            select: { role: true, blocks: true },
           });
           history = rows.reverse().flatMap(({ role, blocks }) => {
             const content = extractTextFromBlocks(blocks).slice(0, 2000);
             return content && (role === "assistant" || role === "bot" || role === "user")
-              ? [{ content, role: (role === "user" ? "user" : "assistant") as "user" | "assistant" }]
+              ? [
+                  {
+                    content,
+                    role: (role === "user" ? "user" : "assistant") as "user" | "assistant",
+                  },
+                ]
               : [];
           });
         }
       }
       const attached = source?.blocks.map(({ markdown }) => markdown).join("\n\n") ?? "";
       if (attached.length > 40_000) {
-        throw new ORPCError("BAD_REQUEST", { message: "Select up to 40,000 characters for comparison." });
+        throw new ORPCError("BAD_REQUEST", {
+          message: "Select up to 40,000 characters for comparison.",
+        });
       }
-      const prompt = [input.prompt, attached ? `Selected reference blocks:
-${attached}` : ""].filter(Boolean).join("\n\n");
+      const prompt = [
+        input.prompt,
+        attached
+          ? `Selected reference blocks:
+${attached}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       const instructions = [
         "Answer directly using clear headings, short paragraphs, and Markdown formatting where it helps.",
         focus ? `Branch focus: ${focus}` : "",
-        inherited ? `Read-only Main context:
-${inherited}` : "",
-      ].filter(Boolean).join("\n\n");
-      if (!completeReply) throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Comparison is unavailable." });
+        inherited
+          ? `Read-only Main context:
+${inherited}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      if (!completeReply)
+        throw new ORPCError("SERVICE_UNAVAILABLE", { message: "Comparison is unavailable." });
 
-      const results = await Promise.all(input.models.map(async (model) => {
-        const started = Date.now();
-        try {
-          const result = await completeReply(actor, {
-            provider: model.provider, modelId: model.modelId, personaPrompt: input.personaPrompt,
-            responseStyle: source?.responseStyle, temperature: source?.temperature, maxTokens: source?.maxTokens,
-          }, { botId, instructions, prompt, history });
-          return { ...model, ...result, latencyMs: Date.now() - started };
-        } catch (err) {
-          return {
-            ...model, text: "", modelLabel: model.displayName, latencyMs: Date.now() - started,
-            error: err instanceof Error ? err.message : "Generation failed.",
-          };
-        }
-      }));
+      const results = await Promise.all(
+        input.models.map(async (model) => {
+          const started = Date.now();
+          try {
+            const result = await completeReply(
+              actor,
+              {
+                provider: model.provider,
+                modelId: model.modelId,
+                personaPrompt: input.personaPrompt,
+                responseStyle: source?.responseStyle,
+                temperature: source?.temperature,
+                maxTokens: source?.maxTokens,
+              },
+              { botId, instructions, prompt, history },
+            );
+            return { ...model, ...result, latencyMs: Date.now() - started };
+          } catch (err) {
+            return {
+              ...model,
+              text: "",
+              modelLabel: model.displayName,
+              latencyMs: Date.now() - started,
+              error: err instanceof Error ? err.message : "Generation failed.",
+            };
+          }
+        }),
+      );
       return { results };
     },
 
     async judgeCompare(
-      _actor: Actor,
+      actor: Actor,
       input: {
         prompt: string;
         candidates: Array<{ modelLabel: string; text: string }>;
+        provider?: string;
+        modelId?: string;
       },
     ) {
+      if (!completeReply) {
+        throw new ORPCError("SERVICE_UNAVAILABLE", {
+          message: "AI Judge is unavailable. You can still select a winner manually.",
+        });
+      }
+      if (input.candidates.length < 2) {
+        throw new ORPCError("BAD_REQUEST", { message: "At least two candidates are required." });
+      }
       const formatted = input.candidates
         .map((c, idx) => `--- CANDIDATE ${idx} (${c.modelLabel}) ---\n${c.text}`)
         .join("\n\n");
 
-      const res = await callBranchCompletion({
-        provider: "openai",
-        modelId: "gpt-4o-mini",
-        temperature: 0.1,
-        maxTokens: 500,
-        messages: [
-          {
-            role: "system",
-            content:
-              'You are an impartial AI Judge comparing model responses. Respond with STRICT valid JSON only: {"winnerIndex":0,"summary":"1-2 sentence verdict","differences":["Bullet 1 explaining how Model A differs from Model B","Bullet 2 on depth/tone/accuracy trade-offs","Bullet 3 on best use case for each"],"scores":[{"index":0,"score":8.5,"rationale":"concise reason"}]}',
-          },
-          {
-            role: "user",
-            content: `User Prompt:\n${input.prompt}\n\n${formatted}`,
-          },
-        ],
-      });
+      const res = await completeReply(
+        actor,
+        {
+          provider: input.provider ?? "openai",
+          modelId: input.modelId ?? "gpt-4o-mini",
+          temperature: 0.1,
+          maxTokens: 600,
+        },
+        {
+          instructions:
+            'You are an impartial AI Judge comparing model responses. Respond with STRICT valid JSON only: {"winnerIndex":0,"summary":"1-2 sentence verdict","differences":["Bullet 1 explaining how Model A differs from Model B","Bullet 2 on depth/tone/accuracy trade-offs","Bullet 3 on best use case for each"],"scores":[{"index":0,"score":8.5,"rationale":"concise reason"}]}',
+          prompt: `User Prompt:\n${input.prompt}\n\n${formatted}`,
+          history: [],
+        },
+      );
 
+      let parsed: {
+        winnerIndex?: unknown;
+        summary?: unknown;
+        differences?: unknown;
+        scores?: unknown;
+      };
       try {
-        const cleaned = res.text.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-        const parsed = JSON.parse(cleaned) as {
-          winnerIndex?: number;
-          summary?: string;
-          differences?: string[];
-          scores?: Array<{ index: number; score: number; rationale: string }>;
-        };
-        if (typeof parsed.winnerIndex === "number" && Array.isArray(parsed.scores)) {
-          return {
-            winnerIndex: Math.max(0, Math.min(input.candidates.length - 1, parsed.winnerIndex)),
-            summary: parsed.summary ?? "Judge evaluation complete.",
-            differences: Array.isArray(parsed.differences) ? parsed.differences : [],
-            scores: parsed.scores,
-          };
-        }
+        const cleaned = res.text
+          .replace(/^```json\s*/i, "")
+          .replace(/```$/i, "")
+          .trim();
+        parsed = JSON.parse(cleaned) as typeof parsed;
       } catch {
-        // Fallback deterministic scoring if judge output wasn't strict JSON
+        throw new ORPCError("BAD_GATEWAY", {
+          message: "AI Judge returned an unreadable evaluation. Please select a winner manually.",
+        });
       }
 
-      const fallbackScores = input.candidates.map((c, idx) => ({
-        index: idx,
-        score: Number((7.5 + Math.min(2, c.text.length / 800)).toFixed(1)),
-        rationale: "Clear, relevant response.",
-      }));
-      const best = fallbackScores.reduce((a, b) => (b.score > a.score ? b : a), fallbackScores[0]!);
+      const winnerIndex =
+        typeof parsed.winnerIndex === "number" &&
+        Number.isInteger(parsed.winnerIndex) &&
+        parsed.winnerIndex >= 0 &&
+        parsed.winnerIndex < input.candidates.length
+          ? parsed.winnerIndex
+          : -1;
+      const validScores = Array.isArray(parsed.scores)
+        ? parsed.scores.filter(
+            (s): s is { index: number; score: number; rationale: string } =>
+              Boolean(s) &&
+              typeof s === "object" &&
+              typeof (s as Record<string, unknown>).index === "number" &&
+              Number.isInteger((s as Record<string, unknown>).index) &&
+              ((s as Record<string, unknown>).index as number) >= 0 &&
+              ((s as Record<string, unknown>).index as number) < input.candidates.length &&
+              typeof (s as Record<string, unknown>).score === "number" &&
+              Number.isFinite((s as Record<string, unknown>).score) &&
+              ((s as Record<string, unknown>).score as number) >= 0 &&
+              ((s as Record<string, unknown>).score as number) <= 10 &&
+              typeof (s as Record<string, unknown>).rationale === "string",
+          )
+        : [];
+      if (winnerIndex < 0 || validScores.length === 0) {
+        throw new ORPCError("BAD_GATEWAY", {
+          message: "AI Judge returned incomplete scores. Please select a winner manually.",
+        });
+      }
+
       return {
-        winnerIndex: best.index,
-        summary: res.text.slice(0, 240) || "Compared all candidates on clarity and completeness.",
-        differences: input.candidates.map(
-          (c) => `${c.modelLabel}: ${c.text.length} chars — ${c.text.slice(0, 90).replace(/\s+/g, " ")}…`,
-        ),
-        scores: fallbackScores,
+        winnerIndex,
+        summary:
+          typeof parsed.summary === "string" && parsed.summary.trim()
+            ? parsed.summary.trim()
+            : "Judge evaluation complete.",
+        differences: Array.isArray(parsed.differences)
+          ? parsed.differences.filter((d): d is string => typeof d === "string")
+          : [],
+        scores: validScores,
       };
     },
 
@@ -2323,6 +2703,18 @@ ${inherited}` : "",
       }
 
       const idempotencyKey = input.idempotencyKey ?? `strategy_${crypto.randomUUID()}`;
+      const intentDigest = sha256Hex(
+        JSON.stringify({
+          strategy: input.strategy,
+          sourceBranchId: sourceBranch.id,
+          targetBranchId: targetBranch.id,
+          selectedText: input.selectedText,
+          selectedBlocks: input.selectedBlocks ?? null,
+          finalAfterText: input.finalAfterText ?? null,
+          instructions: input.instructions ?? null,
+          archiveAfterMerge: input.archiveAfterMerge,
+        }),
+      );
       const describeReceipt = (receipt: {
         id: string;
         mergeReviewId: string | null;
@@ -2369,6 +2761,11 @@ ${inherited}` : "",
         });
         const delta = StoredStrategyMergeSchema.safeParse(revision?.stateDeltaJson).data;
         if (!delta) return null;
+        if (delta.intentDigest && delta.intentDigest !== intentDigest) {
+          throw new ORPCError("CONFLICT", {
+            message: "This idempotency key was already used for a different merge.",
+          });
+        }
         return {
           beforeText: delta.beforeText,
           afterText: delta.afterText,
@@ -2442,7 +2839,7 @@ ${inherited}` : "",
             : undefined;
       const targetBlock = input.previewBase
         ? textBlocks.find((block) => block.index === input.previewBase?.blockIndex)
-        : matchingBlock ?? textBlocks.at(-1);
+        : (matchingBlock ?? textBlocks.at(-1));
       if (!targetBlock) {
         throw new ORPCError("CONFLICT", {
           message: "The destination text block in Main is missing.",
@@ -2492,7 +2889,11 @@ ${inherited}` : "",
       if (sourceBlocks) {
         const messageIds = [...new Set(sourceBlocks.map((block) => block.messageId))];
         const count = await prisma.message.count({
-          where: { id: { in: messageIds }, threadId: sourceBranch.threadId, role: { in: ["assistant", "bot"] } },
+          where: {
+            id: { in: messageIds },
+            threadId: sourceBranch.threadId,
+            role: { in: ["assistant", "bot"] },
+          },
         });
         if (count !== messageIds.length) {
           throw new ORPCError("CONFLICT", {
@@ -2507,24 +2908,35 @@ ${inherited}` : "",
       } else if (input.strategy !== "ai_assisted") {
         afterText = placeMergeText(beforeText, incoming, input.strategy, selection);
       } else {
+        if (!completeReply) {
+          throw new ORPCError("SERVICE_UNAVAILABLE", {
+            message: "AI-Assisted Blend is unavailable. Choose a direct placement mode instead.",
+          });
+        }
         const focusQuote = selection?.quoteText;
-        const synthesized = await callBranchCompletion({
-          provider: "openai",
-          modelId: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are performing an AI-Assisted Merge of a side-branch result into a Main message. Return ONLY the complete merged Main message text with no preamble or commentary.",
-            },
-            {
-              role: "user",
-              content: `Original Main message:\n${beforeText}\n\nBranched excerpt:\n${focusQuote || "(none)"}\n\nSide-branch text to integrate:\n${incoming}\n\nExtra user instructions:\n${input.instructions?.trim() || "Integrate naturally while preserving original structure."}`,
-            },
-          ],
-        });
-        afterText =
-          synthesized.text.trim() || (beforeText ? `${beforeText}\n\n${incoming}` : incoming);
+        const synthesized = await completeReply(
+          actor,
+          {
+            provider: sourceBranch.defaultModelProvider ?? "openai",
+            modelId: sourceBranch.defaultModelId ?? "gpt-4o-mini",
+            temperature: 0.2,
+            maxTokens: 2400,
+          },
+          {
+            botId: undefined,
+            instructions:
+              "You are performing an AI-Assisted Merge of a side-branch result into a Main message. Return ONLY the complete merged Main message text with no preamble or commentary.",
+            prompt: `Original Main message:\n${beforeText}\n\nBranched excerpt:\n${focusQuote || "(none)"}\n\nSide-branch text to integrate:\n${incoming}\n\nExtra user instructions:\n${input.instructions?.trim() || "Integrate naturally while preserving original structure."}`,
+            history: [],
+          },
+        );
+        if (!synthesized.text.trim()) {
+          throw new ORPCError("BAD_GATEWAY", {
+            message:
+              "AI-Assisted Blend returned an empty result. Try again or pick a direct placement mode.",
+          });
+        }
+        afterText = synthesized.text.trim();
       }
 
       if (input.previewOnly) {
@@ -2615,6 +3027,7 @@ ${inherited}` : "",
                 afterContext,
                 previewBase,
                 archivedBranchId,
+                intentDigest,
               },
             },
           });
@@ -2676,23 +3089,113 @@ ${inherited}` : "",
         throw error;
       }
     },
+    async listMergeReceipts(
+      actor: Actor,
+      projectId: string,
+    ): Promise<Array<{ receipt: MergeReceipt; targetMessageId: string | null }>> {
+      await requireProjectAccess(prisma, actor, projectId, "viewer");
+      const rows = await prisma.mergeReceipt.findMany({
+        where: { projectId, undoneByReceiptId: null },
+        orderBy: { createdAt: "desc" },
+        take: 40,
+      });
+      const revIds = rows.map((r) => r.targetAfterRevisionId);
+      const revs = revIds.length
+        ? await prisma.projectRevision.findMany({
+            where: { id: { in: revIds } },
+            select: { id: true, eventType: true, stateDeltaJson: true },
+          })
+        : [];
+      const revMap = new Map(revs.map((r) => [r.id, r]));
+      return rows
+        .filter((r) => revMap.get(r.targetAfterRevisionId)?.eventType !== "merge_undo")
+        .map((r) => {
+          const rev = revMap.get(r.targetAfterRevisionId);
+          const delta = StoredStrategyMergeSchema.safeParse(rev?.stateDeltaJson).data;
+          const rawTargetId =
+            delta?.previewBase.messageId ??
+            (rev?.stateDeltaJson &&
+            typeof rev.stateDeltaJson === "object" &&
+            typeof (rev.stateDeltaJson as Record<string, unknown>).targetMessageId === "string"
+              ? ((rev.stateDeltaJson as Record<string, unknown>).targetMessageId as string)
+              : null);
+          return {
+            targetMessageId: rawTargetId,
+            receipt: {
+              id: r.id,
+              projectId: r.projectId,
+              mergeReviewId: r.mergeReviewId,
+              idempotencyKey: r.idempotencyKey,
+              sourceBranchId: r.sourceBranchId,
+              targetBranchId: r.targetBranchId,
+              sourceHeadRevisionId: r.sourceHeadRevisionId,
+              baseRevisionId: r.baseRevisionId,
+              targetBeforeRevisionId: r.targetBeforeRevisionId,
+              targetAfterRevisionId: r.targetAfterRevisionId,
+              acceptedCount: 1,
+              deferredCount: 0,
+              affectedDependencies: [],
+              undoneByReceiptId: r.undoneByReceiptId,
+              actorUserId: r.actorUserId,
+              createdAt: toIso(r.createdAt),
+            },
+          };
+        });
+    },
   };
 }
 
 async function branchReferenceContext(
   prisma: PrismaClient,
-  origin: { sourceBranchId: string; inheritedUpToSeq: number },
+  origin: {
+    sourceBranchId: string;
+    inheritedUpToSeq: number;
+    createdAt?: Date;
+  },
 ) {
-  const parent = await prisma.branch.findUnique({ where: { id: origin.sourceBranchId }, select: { threadId: true } });
+  const parent = await prisma.branch.findUnique({
+    where: { id: origin.sourceBranchId },
+    select: { threadId: true },
+  });
   if (!parent) return "";
   const rows = await prisma.message.findMany({
     where: {
-      threadId: parent.threadId, role: { in: ["user", "assistant", "bot"] },
+      threadId: parent.threadId,
+      role: { in: ["user", "assistant", "bot"] },
       ...(origin.inheritedUpToSeq > 0 ? { seq: { lte: origin.inheritedUpToSeq } } : {}),
     },
-    orderBy: { seq: "desc" }, take: 16, select: { role: true, blocks: true },
+    orderBy: { seq: "desc" },
+    take: 16,
+    select: {
+      id: true,
+      role: true,
+      blocks: true,
+      revisions: {
+        orderBy: { version: "asc" },
+        select: { version: true, canonicalText: true, sourceAction: true, createdAt: true },
+      },
+    },
   });
-  return rows.reverse().map(({ role, blocks }) => `[${role === "user" ? "user" : "assistant"}]: ${extractTextFromBlocks(blocks).slice(0, 1600)}`).join("\n\n");
+  const forkAt = origin.createdAt;
+  return rows
+    .reverse()
+    .map(({ role, blocks, revisions }) => {
+      let text = extractTextFromBlocks(blocks);
+      if (forkAt && revisions.length > 0) {
+        // Resolve the immutable version at or before fork creation so post-fork edits never leak in.
+        const beforeFork = revisions.filter((rev) => rev.createdAt <= forkAt);
+        if (beforeFork.length > 0) {
+          text = beforeFork.at(-1)!.canonicalText;
+        } else {
+          const original = revisions.find(
+            (rev) => rev.version === 1 || rev.sourceAction === "original",
+          );
+          if (original) text = original.canonicalText;
+        }
+      }
+      return `[${role === "user" ? "user" : "assistant"}]: ${text.slice(0, 1600)}`;
+    })
+    .join("\n\n");
 }
 
 function extractTextFromBlocks(rawBlocks: unknown): string {
@@ -2701,113 +3204,4 @@ function extractTextFromBlocks(rawBlocks: unknown): string {
     .filter((b) => b.kind === "text" && typeof b.text === "string")
     .map((b) => String(b.text))
     .join("\n\n");
-}
-
-async function callBranchCompletion(input: {
-  provider: string;
-  modelId: string;
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
-  temperature?: number;
-  maxTokens?: number;
-}): Promise<{ text: string; modelLabel: string }> {
-  const openaiKey = process.env.OPENAI_API_KEY?.trim();
-  const xaiKey = process.env.XAI_API_KEY?.trim();
-  const uncensoredKey = process.env.UNCENSOREDLLM_API_KEY?.trim();
-  const uncensoredBase = (process.env.UNCENSOREDLLM_BASE_URL?.trim() || "https://api.uncensoredllm.com/v1").replace(/\/$/, "");
-  const refuselessKey = process.env.REFUSELESS_API_KEY?.trim();
-
-  type EndpointAttempt = { url: string; apiKey: string; model: string; label: string };
-  const attempts: EndpointAttempt[] = [];
-
-  const prov = input.provider.toLowerCase();
-  if ((prov === "xai" || prov === "grok") && xaiKey) {
-    attempts.push({
-      url: "https://api.x.ai/v1/chat/completions",
-      apiKey: xaiKey,
-      model: input.modelId.startsWith("grok-") ? input.modelId : "grok-3-mini",
-      label: `xAI · ${input.modelId}`,
-    });
-    attempts.push({
-      url: "https://api.x.ai/v1/chat/completions",
-      apiKey: xaiKey,
-      model: "grok-3-mini",
-      label: "xAI · grok-3-mini",
-    });
-  } else if (prov === "uncensoredllm" && uncensoredKey) {
-    attempts.push({
-      url: `${uncensoredBase}/chat/completions`,
-      apiKey: uncensoredKey,
-      model: input.modelId,
-      label: `UncensoredLLM · ${input.modelId}`,
-    });
-  } else if (prov === "refuseless" && refuselessKey) {
-    attempts.push({
-      url: "https://api.refuseless.com/v1/chat/completions",
-      apiKey: refuselessKey,
-      model: input.modelId,
-      label: `Refuseless · ${input.modelId}`,
-    });
-  }
-
-  if (openaiKey) {
-    if (prov === "openai") {
-      attempts.push({
-        url: "https://api.openai.com/v1/chat/completions",
-        apiKey: openaiKey,
-        model: input.modelId,
-        label: `OpenAI · ${input.modelId}`,
-      });
-    }
-    attempts.push({
-      url: "https://api.openai.com/v1/chat/completions",
-      apiKey: openaiKey,
-      model: "gpt-4o-mini",
-      label: prov === "openai" ? `OpenAI · ${input.modelId}` : `OpenAI · gpt-4o-mini (fallback)`,
-    });
-  }
-  if (xaiKey && prov !== "xai" && prov !== "grok") {
-    attempts.push({
-      url: "https://api.x.ai/v1/chat/completions",
-      apiKey: xaiKey,
-      model: "grok-3-mini",
-      label: "xAI · grok-3-mini (fallback)",
-    });
-  }
-
-  let lastError = "No chat API key configured.";
-  for (const attempt of attempts) {
-    try {
-      const resp = await fetch(attempt.url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${attempt.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: attempt.model,
-          messages: input.messages,
-          temperature: input.temperature ?? 0.3,
-          ...(input.maxTokens ? { max_tokens: input.maxTokens } : {}),
-        }),
-      });
-      if (!resp.ok) {
-        lastError = `${attempt.label} returned HTTP ${resp.status}`;
-        continue;
-      }
-      const data = (await resp.json()) as {
-        choices?: Array<{ message?: { content?: string | null } }>;
-      };
-      const content = data.choices?.[0]?.message?.content?.trim();
-      if (content) {
-        return { text: content, modelLabel: attempt.label };
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  return {
-    text: `Could not reach ${input.provider}:${input.modelId} (${lastError}). Add or verify your API key in Settings → Providers.`,
-    modelLabel: `${input.provider}:${input.modelId}`,
-  };
 }
